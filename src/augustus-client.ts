@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const SANDBOX_BASE = "https://api.sandbox.augustus.com";
 const PRODUCTION_BASE = "https://api.augustus.com";
 
@@ -10,13 +12,21 @@ export class AugustusClient {
     this.baseUrl = sandbox ? SANDBOX_BASE : PRODUCTION_BASE;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    idempotencyKey?: string,
+  ): Promise<T> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+    };
+    if (body) headers["Content-Type"] = "application/json";
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
 
@@ -72,7 +82,7 @@ export class AugustusClient {
     reference: string;
     metadata?: Record<string, string>;
   }) {
-    return this.request<Payout>("POST", "/v1/payouts", params);
+    return this.request<Payout>("POST", "/v1/payouts", params, randomUUID());
   }
 
   async listPayouts(params?: { limit?: number; cursor?: string }) {
@@ -95,7 +105,7 @@ export class AugustusClient {
     source_amount: string;
     metadata?: Record<string, string>;
   }) {
-    return this.request<Conversion>("POST", "/v1/conversions", params);
+    return this.request<Conversion>("POST", "/v1/conversions", params, randomUUID());
   }
 
   async listConversions(params?: { limit?: number; cursor?: string }) {

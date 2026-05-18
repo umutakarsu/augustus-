@@ -23,6 +23,8 @@ Guidelines:
 - If an API call fails, explain the error clearly and suggest what to try next
 - Be concise but thorough — this is a treasury tool, accuracy matters`;
 
+const MAX_HISTORY_MESSAGES = 40;
+
 export class TreasuryAgent {
   private anthropic: Anthropic;
   private augustus: AugustusClient;
@@ -33,8 +35,18 @@ export class TreasuryAgent {
     this.augustus = new AugustusClient(augustusToken, sandbox);
   }
 
+  private trimHistory() {
+    if (this.conversationHistory.length <= MAX_HISTORY_MESSAGES) return;
+    const excess = this.conversationHistory.length - MAX_HISTORY_MESSAGES;
+    this.conversationHistory = this.conversationHistory.slice(excess);
+    if (this.conversationHistory[0]?.role === "assistant") {
+      this.conversationHistory.shift();
+    }
+  }
+
   async chat(userMessage: string): Promise<string> {
     this.conversationHistory.push({ role: "user", content: userMessage });
+    this.trimHistory();
 
     let response = await this.anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
