@@ -1,222 +1,416 @@
-import type { BankingClient, PaymentsClient, PayoutDestination } from "./augustus-client.js";
+import type { BankingClient, PaymentsClient } from "./augustus-client.js";
 
-type Input = Record<string, unknown>;
+type In = Record<string, unknown>;
+type Clients = { banking: BankingClient; payments: PaymentsClient | null };
 
-export async function handleToolCall(
-  banking: BankingClient,
-  payments: PaymentsClient | null,
-  toolName: string,
-  input: Input,
-): Promise<string> {
-  // Banking API tools
-  switch (toolName) {
+export async function handleToolCall(clients: Clients, name: string, input: In): Promise<string> {
+  const { banking, payments } = clients;
+
+  switch (name) {
+    case "verify_and_send_payout":
+      return safePayoutWorkflow(clients, input);
+    case "check_payout_status":
+      return checkPayoutStatus(banking, input.payout_id as string);
+    case "treasury_report":
+      return treasuryReport(banking);
+    case "fx_quote":
+      return fxQuote(banking, input);
+    case "execute_conversion":
+      return executeConversion(banking, input);
+    case "create_payment_link":
+      return createPaymentLink(payments, input);
+    case "check_payment_status":
+      return checkPaymentStatus(clients, input);
+    case "reconcile_deposits":
+      return reconcileDeposits(banking, input);
+    case "refund_payment":
+      return refundPayment(payments, input);
+    case "find_banks":
+      return findBanks(payments, input);
     case "list_accounts":
-      return json(await banking.listAccounts({
-        status: input.status as string | undefined,
-        limit: input.limit as number | undefined,
-      }));
-
-    case "get_account_balance":
-      return json(await banking.getAccountBalance(input.account_id as string));
-
-    case "create_account":
-      return json(await banking.createAccount({
-        account_program_id: input.account_program_id as string,
-        account_type: "virtual_account",
-        beneficiary_data: {
-          legal_name: input.legal_name as string,
-          date_of_birth: input.date_of_birth as string,
-          country_of_citizenship: (input.country_of_citizenship as string) ?? (input.country as string),
-          residential_address: {
-            street_line_1: input.street as string,
-            city: input.city as string,
-            postal_code: input.postal_code as string,
-            country: input.country as string,
-          },
-          identification: {
-            type: input.id_type as string,
-            value: input.id_value as string,
-          },
-        },
-      }));
-
-    case "freeze_account":
-      return json(await banking.freezeAccount(input.account_id as string));
-
-    case "unfreeze_account":
-      return json(await banking.unfreezeAccount(input.account_id as string));
-
-    case "close_account":
-      return json(await banking.closeAccount(input.account_id as string));
-
-    case "list_account_programs":
-      return json(await banking.listAccountPrograms({ limit: input.limit as number | undefined }));
-
+      return json(await banking.listAccounts({ status: input.status as string | undefined }));
     case "list_transactions":
       return json(await banking.listTransactions({
         account_id: input.account_id as string | undefined,
         limit: input.limit as number | undefined,
       }));
+    default:
+      return json({ error: `Unknown tool: ${name}` });
+  }
+}
 
-    case "create_payout":
-      return json(await banking.createPayout({
-        source_account_id: input.source_account_id as string,
-        amount: input.amount as string,
-        currency: input.currency as string,
-        destination: buildPayoutDestination(input),
-        reference: input.reference as string,
-      }));
+// ── Safe Payout Workflow ──────────────────────────────────────────────
 
-    case "list_payouts":
-      return json(await banking.listPayouts({ limit: input.limit as number | undefined }));
+async function safePayoutWorkflow(clients: Clients, input: In): Promise<string> {
+  const iban = input.iban as string;
+  const name = input.account_holder_name as string;
+  const sourceId = input.source_account_id as string;
+  const amount = input.amount as string;
+  const currency = input.currency as string;
+  const reference = input.reference as string;
 
-    case "get_payout_status":
-      return json(await banking.getPayout(input.payout_id as string));
+  const steps: Record<string, unknown> = {};
 
-    case "get_exchange_rate":
-      return json(await banking.getQuote({
-        source_currency: input.source_currency as string,
-        target_currency: input.target_currency as string,
-        source_amount: input.source_amount as string | undefined,
-      }));
-
-    case "convert_currency":
-      return json(await banking.createConversion({
-        source_account_id: input.source_account_id as string,
-        target_account_id: input.target_account_id as string,
-        source_amount: input.source_amount as string,
-      }));
-
-    case "list_conversions":
-      return json(await banking.listConversions({ limit: input.limit as number | undefined }));
-
-    case "list_deposits":
-      return json(await banking.listDeposits({
-        status: input.status as string | undefined,
-        limit: input.limit as number | undefined,
-      }));
-
-    case "get_deposit":
-      return json(await banking.getDeposit(input.deposit_id as string));
-
-    case "create_return":
-      return json(await banking.createReturn({
-        deposit_id: input.deposit_id as string,
-        rail: input.rail as string | undefined,
-      }));
-
-    case "list_returns":
-      return json(await banking.listReturns({ limit: input.limit as number | undefined }));
-
-    case "search_customers":
-      return json(await banking.searchCustomers({
-        query: input.query as string | undefined,
-        limit: input.limit as number | undefined,
-      }));
-
-    case "create_webhook_subscription":
-      return json(await banking.createWebhookSubscription({
-        url: input.url as string,
-        events: input.events as string[],
-      }));
-
-    case "list_webhook_subscriptions":
-      return json(await banking.listWebhookSubscriptions());
-
-    case "delete_webhook_subscription":
-      return json(await banking.deleteWebhookSubscription(input.subscription_id as string));
+  // Step 1: Verify payee (if payments client available)
+  if (clients.payments) {
+    try {
+      const vop = await clients.payments.verifyPayee(iban, name);
+      steps.verification = {
+        result: vop.status,
+        suggestion: vop.suggestedAccountHolderName,
+        safe: vop.status === "match" || vop.status === "partial_match",
+      };
+      if (vop.status === "no_match") {
+        steps.verification_warning = `Name "${name}" does NOT match bank records for ${iban}. Suggested name: ${vop.suggestedAccountHolderName ?? "unavailable"}. Proceeding is risky.`;
+      }
+    } catch {
+      steps.verification = { result: "skipped", reason: "VOP check failed — proceeding without verification" };
+    }
+  } else {
+    steps.verification = { result: "skipped", reason: "Payments API not configured — cannot verify payee" };
   }
 
-  // Payments API tools — require payments client
-  if (!payments) {
+  // Step 2: Check balance
+  const balance = await clients.banking.getBalance(sourceId);
+  const available = parseFloat(balance.amount);
+  const requested = parseFloat(amount);
+  steps.balance_check = {
+    available: `${balance.amount} ${balance.currency}`,
+    requested: `${amount} ${currency}`,
+    sufficient: available >= requested,
+  };
+
+  if (available < requested) {
+    steps.blocked = `Insufficient funds: ${balance.amount} ${balance.currency} available, ${amount} ${currency} requested. Payout NOT sent.`;
+    return json(steps);
+  }
+
+  // Step 3: Send payout
+  const payout = await clients.banking.createPayout({
+    source_account_id: sourceId,
+    amount,
+    currency,
+    destination: { type: "iban", iban, account_holder_name: name },
+    reference,
+  });
+
+  steps.payout = {
+    id: payout.id,
+    status: payout.status,
+    amount: `${payout.amount} ${payout.currency}`,
+    reference: payout.reference,
+    destination: iban,
+  };
+
+  return json(steps);
+}
+
+async function checkPayoutStatus(banking: BankingClient, id: string): Promise<string> {
+  const payout = await banking.getPayout(id);
+  const result: Record<string, unknown> = {
+    id: payout.id,
+    status: payout.status,
+    amount: `${payout.amount} ${payout.currency}`,
+    created: payout.created_at,
+    updated: payout.updated_at,
+  };
+
+  if (payout.failure) {
+    result.failure_reason = payout.failure.message;
+    result.failure_code = payout.failure.code;
+  }
+
+  const created = new Date(payout.created_at).getTime();
+  const age_hours = (Date.now() - created) / (1000 * 60 * 60);
+  if (payout.status === "pending" && age_hours > 24) {
+    result.warning = `Payout has been pending for ${Math.round(age_hours)} hours — this is unusually long.`;
+  }
+
+  return json(result);
+}
+
+// ── Treasury Report ──────────────────────────────────────────────────
+
+async function treasuryReport(banking: BankingClient): Promise<string> {
+  const [accountsRes, payoutsRes, txRes] = await Promise.all([
+    banking.listAccounts({ limit: 100 }),
+    banking.listPayouts({ limit: 20 }),
+    banking.listTransactions({ limit: 30 }),
+  ]);
+
+  // Fetch balances in parallel
+  const balances = await Promise.all(
+    accountsRes.data.map(async (a) => {
+      try {
+        const b = await banking.getBalance(a.id);
+        return { account_id: a.id, label: a.label, currency: a.currency, amount: b.amount, status: a.status };
+      } catch {
+        return { account_id: a.id, label: a.label, currency: a.currency, amount: "error", status: a.status };
+      }
+    }),
+  );
+
+  // Anomaly detection
+  const anomalies: string[] = [];
+
+  for (const b of balances) {
+    if (b.amount === "0" || b.amount === "0.00") {
+      anomalies.push(`Zero balance: ${b.label} (${b.currency})`);
+    }
+  }
+
+  for (const p of payoutsRes.data) {
+    if (p.status === "pending") {
+      const age = (Date.now() - new Date(p.created_at).getTime()) / (1000 * 60 * 60);
+      if (age > 24) {
+        anomalies.push(`Stale payout: ${p.id} — pending for ${Math.round(age)}h (${p.amount} ${p.currency})`);
+      }
+    }
+    if (p.status === "failed") {
+      anomalies.push(`Failed payout: ${p.id} — ${p.failure?.message ?? "unknown reason"} (${p.amount} ${p.currency})`);
+    }
+  }
+
+  for (const tx of txRes.data) {
+    const amt = parseFloat(tx.amount);
+    if (amt > 10000) {
+      anomalies.push(`Large transaction: ${tx.side} ${tx.amount} ${tx.currency} on ${tx.created_at.split("T")[0]}`);
+    }
+  }
+
+  return json({
+    balances,
+    recent_payouts: payoutsRes.data.map((p) => ({
+      id: p.id, status: p.status, amount: `${p.amount} ${p.currency}`, created: p.created_at,
+    })),
+    recent_transactions: txRes.data.slice(0, 10).map((tx) => ({
+      id: tx.id, side: tx.side, amount: `${tx.amount} ${tx.currency}`, ref: tx.reference, date: tx.created_at,
+    })),
+    anomalies: anomalies.length ? anomalies : ["No anomalies detected"],
+    generated_at: new Date().toISOString(),
+  });
+}
+
+// ── FX with Slippage Protection ──────────────────────────────────────
+
+async function fxQuote(banking: BankingClient, input: In): Promise<string> {
+  const quote = await banking.getQuote({
+    source_currency: input.from as string,
+    target_currency: input.to as string,
+    source_amount: input.amount as string | undefined,
+  });
+  return json({
+    rate: quote.rate,
+    from: quote.source_currency,
+    to: quote.target_currency,
+    source_amount: quote.source_amount,
+    target_amount: quote.target_amount,
+    warning: "This rate is indicative and not guaranteed. Actual rate may differ at execution.",
+  });
+}
+
+async function executeConversion(banking: BankingClient, input: In): Promise<string> {
+  const sourceId = input.source_account_id as string;
+  const targetId = input.target_account_id as string;
+  const amount = input.amount as string;
+
+  // Get pre-trade quote
+  const sourceBalance = await banking.getBalance(sourceId);
+  const targetBalance = await banking.getBalance(targetId);
+
+  const quote = await banking.getQuote({
+    source_currency: sourceBalance.currency,
+    target_currency: targetBalance.currency,
+    source_amount: amount,
+  });
+
+  // Execute
+  const conversion = await banking.createConversion({
+    source_account_id: sourceId,
+    target_account_id: targetId,
+    source_amount: amount,
+  });
+
+  // Check slippage
+  const quotedRate = parseFloat(quote.rate);
+  const actualRate = conversion.target_amount && conversion.source_amount
+    ? parseFloat(conversion.target_amount) / parseFloat(conversion.source_amount)
+    : null;
+
+  const result: Record<string, unknown> = {
+    conversion_id: conversion.id,
+    status: conversion.status,
+    source: `${conversion.source_amount} ${conversion.source_currency}`,
+    target: `${conversion.target_amount} ${conversion.target_currency}`,
+    quoted_rate: quote.rate,
+    actual_rate: actualRate?.toFixed(6) ?? "pending",
+  };
+
+  if (actualRate !== null) {
+    const slippage = Math.abs(actualRate - quotedRate) / quotedRate;
+    result.slippage_pct = (slippage * 100).toFixed(3);
+    if (slippage > 0.005) {
+      result.slippage_warning = `Rate slippage of ${(slippage * 100).toFixed(2)}% exceeds 0.5% threshold. Quoted ${quote.rate}, got ${actualRate.toFixed(6)}.`;
+    }
+  }
+
+  return json(result);
+}
+
+// ── Payment Acceptance ───────────────────────────────────────────────
+
+async function createPaymentLink(payments: PaymentsClient | null, input: In): Promise<string> {
+  if (!payments) return json({ error: "Set AUGUSTUS_PAYMENTS_API_KEY to create payment links" });
+
+  const session = await payments.createCheckout({
+    price: { total: input.amount as number, currency: input.currency as string },
+    referenceId: input.reference_id as string,
+    successCallbackUrl: input.success_url as string,
+    errorCallbackUrl: input.error_url as string,
+    paymentSchemeSelection: "instant_preferred",
+    market: input.market as string | undefined,
+    customer: input.customer_email ? { email: input.customer_email as string } : undefined,
+  });
+
+  return json({
+    session_id: session.id,
+    payment_link: session.redirectUrl,
+    status: session.status,
+    amount: `${session.price.total} ${session.price.currency}`,
+    reference: session.referenceId,
+    expires_at: new Date(session.expiresAt * 1000).toISOString(),
+    tip: input.customer_email
+      ? "Remember Me enabled — returning customers will check out faster."
+      : "Consider adding customer_email to enable Remember Me (20%+ conversion boost).",
+  });
+}
+
+async function checkPaymentStatus(clients: Clients, input: In): Promise<string> {
+  if (input.checkout_id && clients.payments) {
+    const session = await clients.payments.getCheckout(input.checkout_id as string);
     return json({
-      error: "Payments API not configured. Set AUGUSTUS_PAYMENTS_API_KEY to use checkout, orders, refunds, bank search, and VOP.",
+      type: "checkout_session",
+      id: session.id,
+      status: session.status,
+      amount: `${session.price.total} ${session.price.currency}`,
+      reference: session.referenceId,
     });
   }
-
-  switch (toolName) {
-    case "create_checkout_session":
-      return json(await payments.createCheckoutSession({
-        price: { total: input.amount as number, currency: input.currency as string },
-        referenceId: input.reference_id as string,
-        successCallbackUrl: input.success_url as string,
-        errorCallbackUrl: input.error_url as string,
-        paymentSchemeSelection: input.payment_scheme as string | undefined,
-        market: input.market as string | undefined,
-        customer: input.customer_email ? { email: input.customer_email as string } : undefined,
-      }));
-
-    case "get_checkout_session":
-      return json(await payments.retrieveCheckoutSession(input.session_id as string));
-
-    case "expire_checkout_session":
-      return json(await payments.expireCheckoutSession(input.session_id as string));
-
-    case "create_order":
-      return json(await payments.createOrder({
-        amount: input.amount as number,
-        currency: input.currency as string,
-        referenceId: input.reference_id as string,
-        customer: input.customer_email ? { email: input.customer_email as string } : undefined,
-      }));
-
-    case "get_order":
-      return json(await payments.retrieveOrder(input.order_id as string));
-
-    case "expire_order":
-      return json(await payments.expireOrder(input.order_id as string));
-
-    case "create_refund":
-      return json(await payments.createRefund({
-        orderId: input.order_id as string | undefined,
-        referenceId: input.reference_id as string | undefined,
-        amount: input.amount as number,
-      }));
-
-    case "get_refund":
-      return json(await payments.retrieveRefund(input.refund_id as string));
-
-    case "search_banks":
-      return json(await payments.searchBanks({
-        search: input.search as string | undefined,
-        market: input.market as string | undefined,
-        currency: input.currency as string | undefined,
-      }));
-
-    case "verify_payee":
-      return json(await payments.verifyPayee({
-        payee: {
-          type: "iban",
-          iban: {
-            accountHolderName: input.account_holder_name as string,
-            iban: input.iban as string,
-            bic: input.bic as string | undefined,
-          },
-        },
-      }));
-
-    case "get_capabilities":
-      return json(await payments.getCapabilities(input.market as string));
-
-    default:
-      return json({ error: `Unknown tool: ${toolName}` });
+  if (input.order_id && clients.payments) {
+    const order = await clients.payments.getOrder(input.order_id as string);
+    return json({
+      type: "order",
+      id: order.id,
+      status: order.status,
+      settled: order.status === "paid",
+      amount: `${order.price.total} ${order.price.currency}`,
+      reference: order.referenceId,
+    });
   }
+  return json({ error: "Provide checkout_id or order_id. Payments API must be configured." });
+}
+
+// ── Reconciliation ───────────────────────────────────────────────────
+
+interface ExpectedPayment { reference: string; amount: string; currency: string }
+
+async function reconcileDeposits(banking: BankingClient, input: In): Promise<string> {
+  const expected = input.expected as ExpectedPayment[];
+  const limit = (input.limit as number) ?? 50;
+
+  const depositsRes = await banking.listDeposits({ limit });
+  const deposits = depositsRes.data;
+
+  const matched: Array<{ expected: ExpectedPayment; deposit_id: string; deposit_amount: string }> = [];
+  const unmatchedDeposits: typeof deposits = [];
+  const unmatchedExpected: ExpectedPayment[] = [];
+  const usedDeposits = new Set<string>();
+
+  for (const exp of expected) {
+    const match = deposits.find(
+      (d) =>
+        !usedDeposits.has(d.id) &&
+        d.bank_statement_reference === exp.reference &&
+        d.amount === exp.amount &&
+        d.currency === exp.currency,
+    );
+
+    if (match) {
+      matched.push({ expected: exp, deposit_id: match.id, deposit_amount: `${match.amount} ${match.currency}` });
+      usedDeposits.add(match.id);
+    } else {
+      unmatchedExpected.push(exp);
+    }
+  }
+
+  for (const d of deposits) {
+    if (!usedDeposits.has(d.id)) {
+      unmatchedDeposits.push(d);
+    }
+  }
+
+  return json({
+    summary: {
+      total_expected: expected.length,
+      matched: matched.length,
+      missing_payments: unmatchedExpected.length,
+      unexpected_deposits: unmatchedDeposits.length,
+    },
+    matched,
+    missing_payments: unmatchedExpected.length
+      ? { items: unmatchedExpected, note: "These expected payments have not been received yet." }
+      : null,
+    unexpected_deposits: unmatchedDeposits.length
+      ? {
+          items: unmatchedDeposits.map((d) => ({
+            id: d.id, amount: `${d.amount} ${d.currency}`, ref: d.bank_statement_reference, received: d.created_at,
+          })),
+          note: "These deposits were received but don't match any expected payment.",
+        }
+      : null,
+  });
+}
+
+// ── Refunds ──────────────────────────────────────────────────────────
+
+async function refundPayment(payments: PaymentsClient | null, input: In): Promise<string> {
+  if (!payments) return json({ error: "Set AUGUSTUS_PAYMENTS_API_KEY to issue refunds" });
+
+  const refund = await payments.createRefund({
+    orderId: input.order_id as string | undefined,
+    referenceId: input.reference_id as string | undefined,
+    amount: input.amount as number,
+  });
+
+  return json({
+    refund_id: refund.id,
+    status: refund.status,
+    amount: `${refund.amount} ${refund.currency}`,
+    order_id: refund.orderId,
+  });
+}
+
+// ── Bank Search ──────────────────────────────────────────────────────
+
+async function findBanks(payments: PaymentsClient | null, input: In): Promise<string> {
+  if (!payments) return json({ error: "Set AUGUSTUS_PAYMENTS_API_KEY to search banks" });
+
+  const result = await payments.searchBanks({
+    market: input.country as string | undefined,
+    search: input.search as string | undefined,
+  });
+
+  return json({
+    count: result.count,
+    banks: result.banks.slice(0, 20).map((b) => ({
+      name: b.name,
+      market: b.market,
+      currencies: b.currencies,
+    })),
+    note: result.count > 20 ? `Showing 20 of ${result.count}. Use a more specific search to narrow results.` : undefined,
+  });
 }
 
 function json(data: unknown): string {
   return JSON.stringify(data, null, 2);
-}
-
-function buildPayoutDestination(input: Input): PayoutDestination {
-  const type = input.destination_type as string;
-  if (type === "iban") {
-    return { type: "iban", iban: input.iban as string, account_holder_name: input.account_holder_name as string };
-  }
-  if (type === "sort_code") {
-    return { type: "sort_code", sort_code: input.sort_code as string, account_number: input.account_number as string, account_holder_name: input.account_holder_name as string };
-  }
-  if (type === "crypto") {
-    return { type: "crypto", address: input.wallet_address as string, blockchain: input.blockchain as string };
-  }
-  throw new Error(`Unknown destination type: ${type}`);
 }

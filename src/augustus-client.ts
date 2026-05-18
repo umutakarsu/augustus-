@@ -1,371 +1,211 @@
 import { randomUUID } from "node:crypto";
 
 const BANKING_SANDBOX = "https://api.sandbox.augustus.com";
-const BANKING_PRODUCTION = "https://api.augustus.com";
+const BANKING_PROD = "https://api.augustus.com";
 const PAYMENTS_SANDBOX = "https://api.sand.getivy.de";
-const PAYMENTS_PRODUCTION = "https://api.getivy.de";
+const PAYMENTS_PROD = "https://api.getivy.de";
 
-// --- Banking API Client (new Augustus v1 REST API) ---
+async function call<T>(
+  base: string,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body?: unknown,
+): Promise<T> {
+  if (body) headers["Content-Type"] = "application/json";
 
-export class BankingClient {
-  private baseUrl: string;
-  private token: string;
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
 
-  constructor(token: string, sandbox = true) {
-    this.token = token;
-    this.baseUrl = sandbox ? BANKING_SANDBOX : BANKING_PRODUCTION;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${method} ${path} → ${res.status}: ${text}`);
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    idempotencyKey?: string,
-  ): Promise<T> {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.token}`,
-    };
-    if (body) headers["Content-Type"] = "application/json";
-    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Banking API ${method} ${path} → ${res.status}: ${text}`);
-    }
-
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
     return res.json() as Promise<T>;
   }
+  return {} as T;
+}
 
-  private buildQuery(params: Record<string, string | number | undefined>): string {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined) qs.set(k, String(v));
-    }
-    const s = qs.toString();
-    return s ? `?${s}` : "";
+export class BankingClient {
+  private base: string;
+  private token: string;
+
+  constructor(token: string, sandbox: boolean) {
+    this.token = token;
+    this.base = sandbox ? BANKING_SANDBOX : BANKING_PROD;
+  }
+
+  private headers(idempotent = false): Record<string, string> {
+    const h: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    if (idempotent) h["Idempotency-Key"] = randomUUID();
+    return h;
+  }
+
+  private qs(params: Record<string, string | number | undefined>): string {
+    const entries = Object.entries(params).filter(([, v]) => v !== undefined);
+    if (!entries.length) return "";
+    return "?" + new URLSearchParams(entries.map(([k, v]) => [k, String(v)] as [string, string])).toString();
   }
 
   // Accounts
-  async listAccounts(params?: { limit?: number; status?: string }) {
-    const q = this.buildQuery({ limit: params?.limit, status: params?.status });
-    return this.request<PaginatedResponse<Account>>("GET", `/v1/accounts${q}`);
+  listAccounts(opts?: { limit?: number; status?: string }) {
+    return call<Paginated<Account>>(this.base, "GET", `/v1/accounts${this.qs({ ...opts })}`, this.headers());
   }
 
-  async getAccountBalance(accountId: string) {
-    return this.request<AccountBalance>("GET", `/v1/accounts/${accountId}/balance`);
+  getBalance(id: string) {
+    return call<Balance>(this.base, "GET", `/v1/accounts/${id}/balance`, this.headers());
   }
 
-  async createAccount(params: {
-    account_program_id: string;
-    account_type: string;
-    beneficiary_data: BeneficiaryData;
-  }) {
-    return this.request<Account>("POST", "/v1/accounts", params, randomUUID());
+  freezeAccount(id: string) {
+    return call<Account>(this.base, "POST", `/v1/accounts/${id}/freeze`, this.headers(true), {});
   }
 
-  async freezeAccount(accountId: string) {
-    return this.request<Account>("POST", `/v1/accounts/${accountId}/freeze`, {}, randomUUID());
-  }
-
-  async unfreezeAccount(accountId: string) {
-    return this.request<Account>("POST", `/v1/accounts/${accountId}/unfreeze`, {}, randomUUID());
-  }
-
-  async closeAccount(accountId: string) {
-    return this.request<Account>("POST", `/v1/accounts/${accountId}/close`, {}, randomUUID());
-  }
-
-  // Account Programs
-  async listAccountPrograms(params?: { limit?: number }) {
-    const q = this.buildQuery({ limit: params?.limit });
-    return this.request<PaginatedResponse<AccountProgram>>("GET", `/v1/account_programs${q}`);
+  unfreezeAccount(id: string) {
+    return call<Account>(this.base, "POST", `/v1/accounts/${id}/unfreeze`, this.headers(true), {});
   }
 
   // Transactions
-  async listTransactions(params?: { limit?: number; account_id?: string }) {
-    const q = this.buildQuery({ limit: params?.limit, account_id: params?.account_id });
-    return this.request<PaginatedResponse<Transaction>>("GET", `/v1/transactions${q}`);
+  listTransactions(opts?: { account_id?: string; limit?: number }) {
+    return call<Paginated<Transaction>>(this.base, "GET", `/v1/transactions${this.qs({ ...opts })}`, this.headers());
   }
 
   // Payouts
-  async createPayout(params: {
+  createPayout(params: {
     source_account_id: string;
     amount: string;
     currency: string;
     destination: PayoutDestination;
     reference: string;
   }) {
-    return this.request<Payout>("POST", "/v1/payouts", params, randomUUID());
+    return call<Payout>(this.base, "POST", "/v1/payouts", this.headers(true), params);
   }
 
-  async listPayouts(params?: { limit?: number }) {
-    const q = this.buildQuery({ limit: params?.limit });
-    return this.request<PaginatedResponse<Payout>>("GET", `/v1/payouts${q}`);
+  getPayout(id: string) {
+    return call<Payout>(this.base, "GET", `/v1/payouts/${id}`, this.headers());
   }
 
-  async getPayout(payoutId: string) {
-    return this.request<Payout>("GET", `/v1/payouts/${payoutId}`);
+  listPayouts(opts?: { limit?: number }) {
+    return call<Paginated<Payout>>(this.base, "GET", `/v1/payouts${this.qs({ ...opts })}`, this.headers());
   }
 
-  // Conversions
-  async createConversion(params: {
-    source_account_id: string;
-    target_account_id: string;
-    source_amount: string;
-  }) {
-    return this.request<Conversion>("POST", "/v1/conversions", params, randomUUID());
+  // FX
+  getQuote(params: { source_currency: string; target_currency: string; source_amount?: string }) {
+    return call<Quote>(this.base, "GET", `/v1/quotes/indicative${this.qs(params)}`, this.headers());
   }
 
-  async listConversions(params?: { limit?: number }) {
-    const q = this.buildQuery({ limit: params?.limit });
-    return this.request<PaginatedResponse<Conversion>>("GET", `/v1/conversions${q}`);
+  createConversion(params: { source_account_id: string; target_account_id: string; source_amount: string }) {
+    return call<Conversion>(this.base, "POST", "/v1/conversions", this.headers(true), params);
+  }
+
+  getConversion(id: string) {
+    return call<Conversion>(this.base, "GET", `/v1/conversions/${id}`, this.headers());
   }
 
   // Deposits
-  async listDeposits(params?: { limit?: number; status?: string }) {
-    const q = this.buildQuery({ limit: params?.limit, status: params?.status });
-    return this.request<PaginatedResponse<Deposit>>("GET", `/v1/deposits${q}`);
+  listDeposits(opts?: { limit?: number; status?: string }) {
+    return call<Paginated<Deposit>>(this.base, "GET", `/v1/deposits${this.qs({ ...opts })}`, this.headers());
   }
 
-  async getDeposit(depositId: string) {
-    return this.request<Deposit>("GET", `/v1/deposits/${depositId}`);
+  getDeposit(id: string) {
+    return call<Deposit>(this.base, "GET", `/v1/deposits/${id}`, this.headers());
   }
 
   // Returns
-  async createReturn(params: { deposit_id: string; rail?: string }) {
-    return this.request<Return>("POST", "/v1/returns", params, randomUUID());
-  }
-
-  async listReturns(params?: { limit?: number }) {
-    const q = this.buildQuery({ limit: params?.limit });
-    return this.request<PaginatedResponse<Return>>("GET", `/v1/returns${q}`);
-  }
-
-  // Quotes
-  async getQuote(params: {
-    source_currency: string;
-    target_currency: string;
-    source_amount?: string;
-  }) {
-    const q = this.buildQuery(params);
-    return this.request<Quote>("GET", `/v1/quotes/indicative${q}`);
-  }
-
-  // Customers
-  async searchCustomers(params?: { query?: string; limit?: number }) {
-    const q = this.buildQuery({ query: params?.query, limit: params?.limit });
-    return this.request<PaginatedResponse<Customer>>("GET", `/v1/customers${q}`);
-  }
-
-  // Webhook Subscriptions
-  async createWebhookSubscription(params: { url: string; events: string[] }) {
-    return this.request<WebhookSubscription>("POST", "/v1/webhook_subscriptions", params, randomUUID());
-  }
-
-  async listWebhookSubscriptions() {
-    return this.request<PaginatedResponse<WebhookSubscription>>("GET", "/v1/webhook_subscriptions");
-  }
-
-  async deleteWebhookSubscription(id: string) {
-    return this.request<void>("DELETE", `/v1/webhook_subscriptions/${id}`);
+  createReturn(params: { deposit_id: string; rail?: string }) {
+    return call<Return>(this.base, "POST", "/v1/returns", this.headers(true), params);
   }
 }
 
-// --- Payments API Client (legacy Ivy API) ---
-
 export class PaymentsClient {
-  private baseUrl: string;
-  private apiKey: string;
+  private base: string;
+  private key: string;
 
-  constructor(apiKey: string, sandbox = true) {
-    this.apiKey = apiKey;
-    this.baseUrl = sandbox ? PAYMENTS_SANDBOX : PAYMENTS_PRODUCTION;
+  constructor(key: string, sandbox: boolean) {
+    this.key = key;
+    this.base = sandbox ? PAYMENTS_SANDBOX : PAYMENTS_PROD;
   }
 
-  private async request<T>(path: string, body: unknown, idempotencyKey?: string): Promise<T> {
-    const headers: Record<string, string> = {
-      "X-Ivy-Api-Key": this.apiKey,
-      "Content-Type": "application/json",
-    };
-    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Payments API ${path} → ${res.status}: ${text}`);
-    }
-
-    return res.json() as Promise<T>;
+  private headers(idempotent = false): Record<string, string> {
+    const h: Record<string, string> = { "X-Ivy-Api-Key": this.key };
+    if (idempotent) h["Idempotency-Key"] = randomUUID();
+    return h;
   }
 
-  // Checkout Sessions
-  async createCheckoutSession(params: {
+  private post<T>(path: string, body: unknown, idempotent = false) {
+    return call<T>(this.base, "POST", path, this.headers(idempotent), body);
+  }
+
+  // Checkout
+  createCheckout(params: {
     price: { total: number; currency: string };
     referenceId: string;
     successCallbackUrl: string;
     errorCallbackUrl: string;
     paymentSchemeSelection?: string;
     market?: string;
-    customer?: { email?: string };
-    metadata?: Record<string, string>;
+    customer?: { email: string };
   }) {
-    return this.request<CheckoutSession>(
-      "/api/service/checkout/session/create",
-      params,
-      randomUUID(),
-    );
+    return this.post<CheckoutSession>("/api/service/checkout/session/create", params, true);
   }
 
-  async retrieveCheckoutSession(id: string) {
-    return this.request<CheckoutSession>("/api/service/checkout/session/details", { id });
-  }
-
-  async expireCheckoutSession(id: string) {
-    return this.request<CheckoutSession>("/api/service/checkout/session/expire", { id });
+  getCheckout(id: string) {
+    return this.post<CheckoutSession>("/api/service/checkout/session/details", { id });
   }
 
   // Orders
-  async createOrder(params: {
-    amount: number;
-    currency: string;
-    referenceId: string;
-    customer?: { email?: string };
-  }) {
-    return this.request<Order>("/api/service/order/create", params, randomUUID());
-  }
-
-  async retrieveOrder(id: string) {
-    return this.request<Order>("/api/service/order/details", { id });
-  }
-
-  async expireOrder(id: string) {
-    return this.request<Order>("/api/service/order/expire", { id });
+  getOrder(id: string) {
+    return this.post<Order>("/api/service/order/details", { id });
   }
 
   // Refunds
-  async createRefund(params: {
-    orderId?: string;
-    referenceId?: string;
-    amount: number;
-  }) {
-    return this.request<Refund>("/api/service/refund/create", params, randomUUID());
+  createRefund(params: { orderId?: string; referenceId?: string; amount: number }) {
+    return this.post<Refund>("/api/service/refund/create", params, true);
   }
 
-  async retrieveRefund(id: string) {
-    return this.request<Refund>("/api/service/refund/retrieve", { id });
+  // VOP
+  verifyPayee(iban: string, name: string, bic?: string) {
+    return this.post<VopResult>("/api/service/payee/verify", {
+      payee: { type: "iban", iban: { accountHolderName: name, iban, bic } },
+    });
   }
 
-  // FX
-  async getExchangeRate(params: {
-    sourceCurrency: string;
-    targetCurrency: string;
-    sourceAmount?: string;
-  }) {
-    return this.request<FxRate>("/api/service/fx/retrieve-rate", params);
-  }
-
-  async executeFx(params: {
-    sourceAccountId: string;
-    targetAccountId: string;
-    sourceAmount: string;
-  }) {
-    return this.request<FxExecution>("/api/service/fx/execute", params, randomUUID());
-  }
-
-  // Bank Search
-  async searchBanks(params?: { search?: string; market?: string; currency?: string }) {
-    return this.request<BankSearchResponse>("/api/service/banks/search", params ?? {});
-  }
-
-  // Verification of Payee
-  async verifyPayee(params: {
-    payee: {
-      type: "iban";
-      iban: { accountHolderName: string; iban: string; bic?: string };
-    };
-  }) {
-    return this.request<VopResult>("/api/service/payee/verify", params);
-  }
-
-  // Capabilities
-  async getCapabilities(market: string) {
-    return this.request<CapabilitiesResponse>("/api/service/merchant/capabilities/details", { market });
+  // Banks
+  searchBanks(params?: { search?: string; market?: string; currency?: string }) {
+    return this.post<BankSearchResult>("/api/service/banks/search", params ?? {});
   }
 }
 
-// --- Banking API Types ---
+// Types — only what we actually use
 
-export interface PaginatedResponse<T> {
-  data: T[];
-  has_more: boolean;
-  next_cursor: string | null;
-}
+export interface Paginated<T> { data: T[]; has_more: boolean; next_cursor: string | null }
 
 export interface Account {
   id: string;
-  type: string;
   currency: string;
   account_type: string;
   status: string;
   asset_type: string;
   label: string;
-  financial_addresses: FinancialAddress[];
-  created_at: string;
-  updated_at: string;
-}
-
-interface FinancialAddress {
-  type: string;
-  iban?: string;
-  bic?: string;
-  sort_code?: string;
-  account_number?: string;
-  address?: string;
-  blockchain?: string;
-}
-
-export interface AccountBalance {
-  type: string;
-  account_id: string;
-  amount: string;
-  currency: string;
-  as_of: string;
-}
-
-interface BeneficiaryData {
-  legal_name: string;
-  date_of_birth: string;
-  country_of_citizenship: string;
-  residential_address: {
-    street_line_1: string;
-    city: string;
-    postal_code: string;
-    country: string;
-  };
-  identification: { type: string; value: string };
-}
-
-interface AccountProgram {
-  id: string;
-  type: string;
-  label: string;
-  account_program_type: string;
-  status: string;
+  financial_addresses: Array<{
+    type: string;
+    iban?: string;
+    sort_code?: string;
+    account_number?: string;
+    address?: string;
+    blockchain?: string;
+  }>;
   created_at: string;
 }
 
-interface Transaction {
+export interface Balance { account_id: string; amount: string; currency: string; as_of: string }
+
+export interface Transaction {
   id: string;
   amount: string;
   currency: string;
@@ -376,7 +216,7 @@ interface Transaction {
 }
 
 export type PayoutDestination =
-  | { type: "iban"; iban: string; account_holder_name: string; bic?: string }
+  | { type: "iban"; iban: string; account_holder_name: string }
   | { type: "sort_code"; sort_code: string; account_number: string; account_holder_name: string }
   | { type: "crypto"; address: string; blockchain: string };
 
@@ -388,27 +228,31 @@ export interface Payout {
   destination: PayoutDestination;
   reference: string;
   failure: { code: string; message: string } | null;
-  metadata: Record<string, string>;
   created_at: string;
   updated_at: string;
 }
 
-interface Conversion {
+export interface Quote {
+  rate: string;
+  source_currency: string;
+  target_currency: string;
+  source_amount?: string;
+  target_amount?: string;
+}
+
+export interface Conversion {
   id: string;
   status: string;
   source_amount: string;
   source_currency: string;
   target_amount: string;
   target_currency: string;
-  source_account_id: string;
-  target_account_id: string;
   created_at: string;
   completed_at: string | null;
 }
 
-interface Deposit {
+export interface Deposit {
   id: string;
-  type: string;
   status: string;
   amount: string;
   currency: string;
@@ -416,114 +260,52 @@ interface Deposit {
   destination_account_id: string;
   bank_statement_reference: string;
   rail: string;
-  tx_hash?: string;
   returns: string[];
   created_at: string;
-  updated_at: string;
 }
 
-interface Return {
+export interface Return {
   id: string;
-  type: string;
   status: string;
   deposit_id: string;
   amount: string;
   currency: string;
   failure: { code: string; message: string; retry: boolean } | null;
   created_at: string;
-  updated_at: string;
 }
 
-interface Quote {
-  source_currency: string;
-  target_currency: string;
-  rate: string;
-  source_amount?: string;
-  target_amount?: string;
-}
-
-interface Customer {
-  id: string;
-  email: string;
-  name: string;
-  created_at: string;
-}
-
-interface WebhookSubscription {
-  id: string;
-  type: string;
-  url: string;
-  events: string[];
-  created_at: string;
-  updated_at: string;
-}
-
-// --- Payments API Types ---
-
-interface CheckoutSession {
+export interface CheckoutSession {
   id: string;
   status: string;
   redirectUrl: string;
   referenceId: string;
   price: { total: number; currency: string };
-  merchant: { legalName: string };
-  market: string;
   created: number;
   expiresAt: number;
 }
 
-interface Order {
+export interface Order {
   id: string;
   status: string;
   referenceId: string;
   price: { total: number; currency: string };
-  destination?: { bankStatementReference: string };
   createdAt: string;
-  updatedAt: string;
 }
 
-interface Refund {
+export interface Refund {
   id: string;
   amount: number;
   currency: string;
   status: string;
   orderId: string;
-  transactionId: string;
 }
 
-interface FxRate {
-  rate: string;
-  sourceAmount?: string;
-  targetAmount?: string;
-}
-
-interface FxExecution {
-  id: string;
-  rate: string;
-  sourceAmount: string;
-  targetAmount: string;
-  sourceCurrency: string;
-  targetCurrency: string;
-  status: string;
-}
-
-interface BankSearchResponse {
-  banks: Array<{
-    id: string;
-    name: string;
-    logo: string;
-    market: string;
-    currencies: string[];
-  }>;
-  count: number;
-  hasNext: boolean;
-}
-
-interface VopResult {
+export interface VopResult {
   status: "match" | "partial_match" | "no_match" | "not_available";
   suggestedAccountHolderName?: string;
 }
 
-interface CapabilitiesResponse {
-  capabilities: string[];
+export interface BankSearchResult {
+  banks: Array<{ id: string; name: string; logo: string; market: string; currencies: string[] }>;
+  count: number;
 }

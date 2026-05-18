@@ -3,112 +3,107 @@ import { BankingClient, PaymentsClient } from "./augustus-client.js";
 import { tools } from "./tools.js";
 import { handleToolCall } from "./tool-handler.js";
 
-const SYSTEM_PROMPT = `You are Augustus Treasury, an AI assistant for the Augustus platform — the clearing bank for the AI era.
+const SYSTEM_PROMPT = `You manage treasury operations on the Augustus platform. You have tools for the full payment lifecycle — not just individual API calls.
 
-You have access to BOTH of Augustus's APIs:
+Your tools are organized as workflows:
 
-**Banking API** (accounts, treasury, FX):
-- View and manage accounts (fiat: EUR, GBP, USD / crypto: USDC)
-- Create virtual accounts under account programs
-- Freeze, unfreeze, and close accounts
-- List and filter transactions
-- Send payouts to IBAN, UK sort code, or crypto wallets
-- Get live FX rates and execute currency conversions
-- Monitor incoming deposits and process returns
-- Manage webhook subscriptions
+SENDING MONEY:
+- verify_and_send_payout: Checks VOP, verifies balance, then sends. Use this instead of raw payout calls.
+- check_payout_status: Tracks settlement. Warns if a payout is stuck.
 
-**Payments API** (checkout, orders, refunds):
-- Create Open Banking checkout sessions with redirect URLs
-- Create manual bank transfer orders
-- Track order lifecycle (waiting_for_payment → processing → paid)
-- Issue full or partial refunds
-- Search supported banks by country and currency
-- Verify payee identity (VOP) before sending payments
-- Check market capabilities (AIS/PIS)
+TREASURY OVERVIEW:
+- treasury_report: One-shot view of all accounts, balances, payouts, and anomalies.
 
-Guidelines:
-- Always confirm before executing writes (payouts, conversions, returns, refunds, account changes)
-- Format monetary amounts with currency symbols
-- For checkout sessions, always show the redirect URL prominently
-- When verifying payees, explain what match/partial_match/no_match means
-- If an API call fails, explain the error and suggest what to try next
-- Be concise but thorough — this is a payments tool, accuracy matters`;
+CURRENCY CONVERSION:
+- fx_quote: Get indicative rate. Always mention rates aren't guaranteed.
+- execute_conversion: Converts and checks for slippage against the quoted rate.
 
-const MAX_HISTORY_MESSAGES = 40;
+ACCEPTING PAYMENTS:
+- create_payment_link: Creates a checkout session with sensible defaults. Always show the redirect URL.
+- check_payment_status: Checks if a payment has settled.
+
+RECONCILIATION:
+- reconcile_deposits: Cross-references deposits against expected payments. Flags mismatches.
+
+REFUNDS:
+- refund_payment: Full or partial refunds by order ID.
+
+LOOKUP:
+- find_banks: Bank availability by country.
+- list_accounts / list_transactions: Direct data access.
+
+Rules:
+- For payouts and conversions: summarize what you're about to do and get confirmation before calling the tool.
+- For VOP no_match results: explain the risk clearly but let the user decide.
+- For treasury reports: highlight anomalies first, then show the details.
+- For slippage warnings: explain what happened and whether the conversion still went through.
+- Don't add filler. Be direct.`;
+
+const MAX_HISTORY = 40;
 
 export class TreasuryAgent {
   private anthropic: Anthropic;
-  private banking: BankingClient;
-  private payments: PaymentsClient | null;
-  private conversationHistory: Anthropic.MessageParam[] = [];
+  private clients: { banking: BankingClient; payments: PaymentsClient | null };
+  private history: Anthropic.MessageParam[] = [];
 
-  constructor(bankingToken: string, paymentsKey: string | null, sandbox = true) {
+  constructor(bankingToken: string, paymentsKey: string | null, sandbox: boolean) {
     this.anthropic = new Anthropic();
-    this.banking = new BankingClient(bankingToken, sandbox);
-    this.payments = paymentsKey ? new PaymentsClient(paymentsKey, sandbox) : null;
+    this.clients = {
+      banking: new BankingClient(bankingToken, sandbox),
+      payments: paymentsKey ? new PaymentsClient(paymentsKey, sandbox) : null,
+    };
   }
 
-  private trimHistory() {
-    if (this.conversationHistory.length <= MAX_HISTORY_MESSAGES) return;
-    const excess = this.conversationHistory.length - MAX_HISTORY_MESSAGES;
-    this.conversationHistory = this.conversationHistory.slice(excess);
-    if (this.conversationHistory[0]?.role === "assistant") {
-      this.conversationHistory.shift();
+  async chat(message: string): Promise<string> {
+    this.history.push({ role: "user", content: message });
+    if (this.history.length > MAX_HISTORY) {
+      this.history = this.history.slice(this.history.length - MAX_HISTORY);
+      if (this.history[0]?.role === "assistant") this.history.shift();
     }
-  }
 
-  async chat(userMessage: string): Promise<string> {
-    this.conversationHistory.push({ role: "user", content: userMessage });
-    this.trimHistory();
-
-    let response = await this.anthropic.messages.create({
+    let res = await this.anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       tools,
-      messages: this.conversationHistory,
+      messages: this.history,
     });
 
-    while (response.stop_reason === "tool_use") {
-      const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
+    while (res.stop_reason === "tool_use") {
+      this.history.push({ role: "assistant", content: res.content });
 
-      this.conversationHistory.push({ role: "assistant", content: response.content });
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-      for (const block of toolUseBlocks) {
+      const results: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of res.content) {
         if (block.type !== "tool_use") continue;
 
         process.stdout.write(`  ⚡ ${block.name.replace(/_/g, " ")}...`);
-
-        let result: string;
+        let output: string;
         try {
-          result = await handleToolCall(this.banking, this.payments, block.name, block.input as Record<string, unknown>);
+          output = await handleToolCall(this.clients, block.name, block.input as Record<string, unknown>);
           process.stdout.write(" done\n");
         } catch (err) {
-          const message = err instanceof Error ? err.message : "Unknown error";
-          result = JSON.stringify({ error: message });
+          output = JSON.stringify({ error: err instanceof Error ? err.message : "Unknown error" });
           process.stdout.write(" error\n");
         }
-
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
+        results.push({ type: "tool_result", tool_use_id: block.id, content: output });
       }
 
-      this.conversationHistory.push({ role: "user", content: toolResults });
-
-      response = await this.anthropic.messages.create({
+      this.history.push({ role: "user", content: results });
+      res = await this.anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
         system: SYSTEM_PROMPT,
         tools,
-        messages: this.conversationHistory,
+        messages: this.history,
       });
     }
 
-    const textBlocks = response.content.filter((b) => b.type === "text");
-    const reply = textBlocks.map((b) => ("text" in b ? b.text : "")).join("\n");
+    const reply = res.content
+      .filter((b) => b.type === "text")
+      .map((b) => ("text" in b ? b.text : ""))
+      .join("\n");
 
-    this.conversationHistory.push({ role: "assistant", content: response.content });
-
+    this.history.push({ role: "assistant", content: res.content });
     return reply;
   }
 }
