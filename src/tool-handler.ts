@@ -3,14 +3,28 @@ import type { BankingClient, PaymentsClient } from "./augustus-client.js";
 type In = Record<string, unknown>;
 type Clients = { banking: BankingClient; payments: PaymentsClient | null };
 
+const pendingPayouts = new Map<string, {
+  source_account_id: string;
+  amount: string;
+  currency: string;
+  iban: string;
+  account_holder_name: string;
+  reference: string;
+  prepared_at: number;
+}>();
+
 export async function handleToolCall(clients: Clients, name: string, input: In): Promise<string> {
   const { banking, payments } = clients;
 
   switch (name) {
-    case "verify_and_send_payout":
-      return safePayoutWorkflow(clients, input);
+    case "prepare_payout":
+      return preparePayout(clients, input);
+    case "confirm_payout":
+      return confirmPayout(clients, input.preparation_id as string);
     case "check_payout_status":
       return checkPayoutStatus(banking, input.payout_id as string);
+    case "retry_failed_payout":
+      return retryFailedPayout(banking, input.payout_id as string);
     case "treasury_report":
       return treasuryReport(banking);
     case "fx_quote":
@@ -39,9 +53,9 @@ export async function handleToolCall(clients: Clients, name: string, input: In):
   }
 }
 
-// ── Safe Payout Workflow ──────────────────────────────────────────────
+// ── Two-Phase Payout Workflow ────────────────────────────────────────
 
-async function safePayoutWorkflow(clients: Clients, input: In): Promise<string> {
+async function preparePayout(clients: Clients, input: In): Promise<string> {
   const iban = input.iban as string;
   const name = input.account_holder_name as string;
   const sourceId = input.source_account_id as string;
@@ -81,28 +95,78 @@ async function safePayoutWorkflow(clients: Clients, input: In): Promise<string> 
   };
 
   if (available < requested) {
-    steps.blocked = `Insufficient funds: ${balance.amount} ${balance.currency} available, ${amount} ${currency} requested. Payout NOT sent.`;
+    steps.blocked = `Insufficient funds: ${balance.amount} ${balance.currency} available, ${amount} ${currency} requested.`;
     return json(steps);
   }
 
-  // Step 3: Send payout
-  const payout = await clients.banking.createPayout({
-    source_account_id: sourceId,
-    amount,
-    currency,
-    destination: { type: "iban", iban, account_holder_name: name },
-    reference,
-  });
+  // Store preparation for confirm step
+  const prepId = `prep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  pendingPayouts.set(prepId, { source_account_id: sourceId, amount, currency, iban, account_holder_name: name, reference, prepared_at: Date.now() });
 
-  steps.payout = {
-    id: payout.id,
-    status: payout.status,
-    amount: `${payout.amount} ${payout.currency}`,
-    reference: payout.reference,
-    destination: iban,
-  };
+  steps.preparation_id = prepId;
+  steps.status = "ready";
+  steps.next_step = "Show the user these results. If they confirm, call confirm_payout with this preparation_id.";
 
   return json(steps);
+}
+
+async function confirmPayout(clients: Clients, prepId: string): Promise<string> {
+  const prep = pendingPayouts.get(prepId);
+  if (!prep) {
+    return json({ error: "Preparation not found or expired. Run prepare_payout again." });
+  }
+
+  const ageMinutes = (Date.now() - prep.prepared_at) / 60_000;
+  if (ageMinutes > 5) {
+    pendingPayouts.delete(prepId);
+    return json({ error: `Preparation expired (${Math.round(ageMinutes)} min old). Balance or VOP status may have changed. Run prepare_payout again.` });
+  }
+
+  const payout = await clients.banking.createPayout({
+    source_account_id: prep.source_account_id,
+    amount: prep.amount,
+    currency: prep.currency,
+    destination: { type: "iban", iban: prep.iban, account_holder_name: prep.account_holder_name },
+    reference: prep.reference,
+  });
+
+  pendingPayouts.delete(prepId);
+
+  return json({
+    payout: {
+      id: payout.id,
+      status: payout.status,
+      amount: `${payout.amount} ${payout.currency}`,
+      reference: payout.reference,
+      destination: prep.iban,
+    },
+  });
+}
+
+async function retryFailedPayout(banking: BankingClient, payoutId: string): Promise<string> {
+  const original = await banking.getPayout(payoutId);
+
+  if (original.status !== "failed") {
+    return json({ error: `Payout ${payoutId} has status "${original.status}" — only failed payouts can be retried.` });
+  }
+
+  const retried = await banking.createPayout({
+    source_account_id: original.source_account_id,
+    amount: original.amount,
+    currency: original.currency,
+    destination: original.destination,
+    reference: original.reference,
+  });
+
+  return json({
+    original_payout: { id: original.id, status: original.status, failure: original.failure?.message },
+    retried_payout: {
+      id: retried.id,
+      status: retried.status,
+      amount: `${retried.amount} ${retried.currency}`,
+      reference: retried.reference,
+    },
+  });
 }
 
 async function checkPayoutStatus(banking: BankingClient, id: string): Promise<string> {
@@ -310,33 +374,64 @@ async function checkPaymentStatus(clients: Clients, input: In): Promise<string> 
   return json({ error: "Provide checkout_id or order_id. Payments API must be configured." });
 }
 
-// ── Reconciliation ───────────────────────────────────────────────────
+// ── Reconciliation (fuzzy matching) ──────────────────────────────────
 
 interface ExpectedPayment { reference: string; amount: string; currency: string }
+
+function refsMatch(expected: string, actual: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_/]+/g, "");
+  const a = norm(expected);
+  const b = norm(actual);
+  return a === b || b.includes(a) || a.includes(b);
+}
+
+function amountsMatch(expected: string, actual: string, tolerance: number): boolean {
+  return Math.abs(parseFloat(expected) - parseFloat(actual)) <= tolerance;
+}
 
 async function reconcileDeposits(banking: BankingClient, input: In): Promise<string> {
   const expected = input.expected as ExpectedPayment[];
   const limit = (input.limit as number) ?? 50;
+  const tolerance = (input.tolerance as number) ?? 0.02;
 
   const depositsRes = await banking.listDeposits({ limit });
   const deposits = depositsRes.data;
 
-  const matched: Array<{ expected: ExpectedPayment; deposit_id: string; deposit_amount: string }> = [];
+  const matched: Array<{ expected: ExpectedPayment; deposit_id: string; deposit_amount: string; match_type: string }> = [];
   const unmatchedDeposits: typeof deposits = [];
   const unmatchedExpected: ExpectedPayment[] = [];
   const usedDeposits = new Set<string>();
 
   for (const exp of expected) {
-    const match = deposits.find(
+    // Try exact match first
+    let match = deposits.find(
       (d) =>
         !usedDeposits.has(d.id) &&
         d.bank_statement_reference === exp.reference &&
         d.amount === exp.amount &&
         d.currency === exp.currency,
     );
+    let matchType = "exact";
+
+    // Fall back to fuzzy match
+    if (!match) {
+      match = deposits.find(
+        (d) =>
+          !usedDeposits.has(d.id) &&
+          d.currency === exp.currency &&
+          refsMatch(exp.reference, d.bank_statement_reference) &&
+          amountsMatch(exp.amount, d.amount, tolerance),
+      );
+      matchType = "fuzzy";
+    }
 
     if (match) {
-      matched.push({ expected: exp, deposit_id: match.id, deposit_amount: `${match.amount} ${match.currency}` });
+      matched.push({
+        expected: exp,
+        deposit_id: match.id,
+        deposit_amount: `${match.amount} ${match.currency}`,
+        match_type: matchType,
+      });
       usedDeposits.add(match.id);
     } else {
       unmatchedExpected.push(exp);
@@ -353,8 +448,11 @@ async function reconcileDeposits(banking: BankingClient, input: In): Promise<str
     summary: {
       total_expected: expected.length,
       matched: matched.length,
+      matched_exact: matched.filter((m) => m.match_type === "exact").length,
+      matched_fuzzy: matched.filter((m) => m.match_type === "fuzzy").length,
       missing_payments: unmatchedExpected.length,
       unexpected_deposits: unmatchedDeposits.length,
+      tolerance_used: tolerance,
     },
     matched,
     missing_payments: unmatchedExpected.length

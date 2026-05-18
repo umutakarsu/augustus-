@@ -223,6 +223,7 @@ export type PayoutDestination =
 export interface Payout {
   id: string;
   status: string;
+  source_account_id: string;
   amount: string;
   currency: string;
   destination: PayoutDestination;

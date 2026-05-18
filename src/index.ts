@@ -22,6 +22,12 @@ async function main() {
 
   const rl = readline.createInterface({ input, output });
 
+  process.on("SIGINT", () => {
+    console.log("\n");
+    rl.close();
+    process.exit(0);
+  });
+
   while (true) {
     const line = await rl.question("you > ");
     const trimmed = line.trim();
@@ -30,8 +36,8 @@ async function main() {
 
     try {
       console.log();
-      const response = await agent.chat(trimmed);
-      console.log(`${response}\n`);
+      await agent.chat(trimmed);
+      console.log();
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : err}\n`);
     }

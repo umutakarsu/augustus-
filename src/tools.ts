@@ -6,11 +6,11 @@ function tool(name: string, description: string, properties: Record<string, unkn
 
 export const tools: Anthropic.Tool[] = [
 
-  // ── Workflow: Safe Payout ──────────────────────────────────────────
-  // The full lifecycle: verify recipient → check funds → send → track
+  // ── Workflow: Safe Payout (two-phase) ──────────────────────────────
+  // Phase 1: pre-flight checks. Phase 2: fire the transfer.
 
-  tool("verify_and_send_payout",
-    "Run the safe payout workflow: (1) verify the payee name matches the IBAN via VOP, (2) check the source account has sufficient balance, (3) send the payout. Reports verification result, balance check, and payout status. If VOP returns no_match, warns but still allows the user to proceed.",
+  tool("prepare_payout",
+    "Pre-flight checks for a payout: (1) verify the payee name via VOP, (2) check the source account balance. Does NOT send money. Returns a preparation_id that you pass to confirm_payout. Always show the user the VOP result and balance check before confirming.",
     {
       source_account_id: { type: "string", description: "Account UUID to debit" },
       amount: { type: "string", description: "Decimal amount (e.g. \"500.00\")" },
@@ -21,9 +21,21 @@ export const tools: Anthropic.Tool[] = [
     },
     ["source_account_id", "amount", "currency", "iban", "account_holder_name", "reference"]),
 
+  tool("confirm_payout",
+    "Execute a payout that was previously prepared with prepare_payout. Only call this AFTER showing the user the preparation results (VOP check, balance check) and getting explicit confirmation.",
+    {
+      preparation_id: { type: "string", description: "The preparation_id returned by prepare_payout" },
+    },
+    ["preparation_id"]),
+
   tool("check_payout_status",
     "Check whether a payout has settled, failed, or is still pending. If failed, includes the failure reason and whether it's retryable.",
     { payout_id: { type: "string", description: "Payout UUID" } },
+    ["payout_id"]),
+
+  tool("retry_failed_payout",
+    "Retry a payout that failed. Fetches the original payout, copies its parameters, and sends a new payout with a fresh idempotency key. Only works on payouts with status 'failed'.",
+    { payout_id: { type: "string", description: "ID of the failed payout to retry" } },
     ["payout_id"]),
 
   // ── Workflow: Treasury Report ──────────────────────────────────────
@@ -78,7 +90,7 @@ export const tools: Anthropic.Tool[] = [
   // ── Workflow: Deposit → Reconciliation ─────────────────────────────
 
   tool("reconcile_deposits",
-    "Pull recent deposits and cross-reference them against expected payments. Lists matched deposits, unmatched deposits (received but not expected), and missing payments (expected but not received). This is the core reconciliation check.",
+    "Pull recent deposits and cross-reference them against expected payments. Uses fuzzy matching: case-insensitive substring on references, ±0.02 tolerance on amounts (covers rounding/fee differences). Lists matched deposits, unmatched deposits (received but not expected), and missing payments (expected but not received).",
     {
       expected: {
         type: "array",
@@ -93,6 +105,7 @@ export const tools: Anthropic.Tool[] = [
         },
         description: "List of expected payments to match against deposits",
       },
+      tolerance: { type: "number", description: "Amount tolerance for fuzzy matching (default 0.02)" },
       limit: { type: "number", description: "How many recent deposits to check (default 50)" },
     },
     ["expected"]),

@@ -29,17 +29,17 @@ function stubBanking(overrides: Partial<BankingClient> = {}): BankingClient {
     }),
     listPayouts: vi.fn().mockResolvedValue({
       data: [
-        { id: "po-1", status: "paid", amount: "500.00", currency: "EUR", reference: "Salary Jan", failure: null, created_at: "2026-05-17T10:00:00Z", updated_at: "2026-05-17T10:05:00Z" },
+        { id: "po-1", status: "paid", source_account_id: "acc-eur", amount: "500.00", currency: "EUR", reference: "Salary Jan", failure: null, created_at: "2026-05-17T10:00:00Z", updated_at: "2026-05-17T10:05:00Z" },
       ],
       has_more: false, next_cursor: null,
     }),
     createPayout: vi.fn().mockResolvedValue({
-      id: "po-new", status: "pending", amount: "500.00", currency: "EUR",
+      id: "po-new", status: "pending", source_account_id: "acc-eur", amount: "500.00", currency: "EUR",
       destination: { type: "iban", iban: "DE89370400440532013000", account_holder_name: "Hans Mueller" },
       reference: "Invoice 42", failure: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     }),
     getPayout: vi.fn().mockResolvedValue({
-      id: "po-1", status: "paid", amount: "500.00", currency: "EUR",
+      id: "po-1", status: "paid", source_account_id: "acc-eur", amount: "500.00", currency: "EUR",
       reference: "Salary Jan", failure: null,
       created_at: "2026-05-17T10:00:00Z", updated_at: "2026-05-17T10:05:00Z",
     }),
@@ -79,66 +79,72 @@ function stubPayments(overrides: Partial<PaymentsClient> = {}): PaymentsClient {
   } as unknown as PaymentsClient;
 }
 
-describe("Safe Payout Workflow", () => {
-  it("blocks payout when balance is insufficient", async () => {
+describe("Two-Phase Payout Workflow", () => {
+  const payoutInput = {
+    source_account_id: "acc-eur",
+    amount: "500.00",
+    currency: "EUR",
+    iban: "DE89370400440532013000",
+    account_holder_name: "Hans Mueller",
+    reference: "Invoice 42",
+  };
+
+  it("blocks preparation when balance is insufficient", async () => {
     const banking = stubBanking();
     const payments = stubPayments();
-    const clients = { banking, payments };
 
-    const result = JSON.parse(await handleToolCall(clients, "verify_and_send_payout", {
+    const result = JSON.parse(await handleToolCall({ banking, payments }, "prepare_payout", {
+      ...payoutInput,
       source_account_id: "acc-broke",
       amount: "5000.00",
-      currency: "EUR",
-      iban: "DE89370400440532013000",
-      account_holder_name: "Hans Mueller",
-      reference: "Too much",
     }));
 
     expect(result.balance_check.sufficient).toBe(false);
     expect(result.blocked).toContain("Insufficient funds");
+    expect(result.preparation_id).toBeUndefined();
     expect(banking.createPayout).not.toHaveBeenCalled();
   });
 
-  it("warns but does not block on VOP no_match", async () => {
+  it("prepare returns VOP warning without sending money", async () => {
     const banking = stubBanking();
     const payments = stubPayments({
       verifyPayee: vi.fn().mockResolvedValue({ status: "no_match", suggestedAccountHolderName: "Johannes Mueller" }),
     });
 
-    const result = JSON.parse(await handleToolCall({ banking, payments }, "verify_and_send_payout", {
-      source_account_id: "acc-eur",
-      amount: "500.00",
-      currency: "EUR",
-      iban: "DE89370400440532013000",
-      account_holder_name: "Hans Mueller",
-      reference: "Invoice 42",
-    }));
+    const result = JSON.parse(await handleToolCall({ banking, payments }, "prepare_payout", payoutInput));
 
     expect(result.verification.result).toBe("no_match");
     expect(result.verification.safe).toBe(false);
     expect(result.verification_warning).toContain("does NOT match");
-    // Payout still sent — user's choice to proceed
-    expect(result.payout.id).toBe("po-new");
-    expect(banking.createPayout).toHaveBeenCalled();
+    expect(result.preparation_id).toBeDefined();
+    expect(result.status).toBe("ready");
+    expect(banking.createPayout).not.toHaveBeenCalled();
   });
 
-  it("proceeds cleanly when VOP matches and funds are sufficient", async () => {
+  it("prepare + confirm sends the payout", async () => {
     const banking = stubBanking();
     const payments = stubPayments();
 
-    const result = JSON.parse(await handleToolCall({ banking, payments }, "verify_and_send_payout", {
-      source_account_id: "acc-eur",
-      amount: "500.00",
-      currency: "EUR",
-      iban: "DE89370400440532013000",
-      account_holder_name: "Hans Mueller",
-      reference: "Invoice 42",
-    }));
+    const prep = JSON.parse(await handleToolCall({ banking, payments }, "prepare_payout", payoutInput));
+    expect(prep.verification.result).toBe("match");
+    expect(prep.preparation_id).toBeDefined();
+    expect(banking.createPayout).not.toHaveBeenCalled();
 
-    expect(result.verification.result).toBe("match");
-    expect(result.verification.safe).toBe(true);
-    expect(result.balance_check.sufficient).toBe(true);
-    expect(result.payout.status).toBe("pending");
+    const confirm = JSON.parse(await handleToolCall({ banking, payments }, "confirm_payout", {
+      preparation_id: prep.preparation_id,
+    }));
+    expect(confirm.payout.id).toBe("po-new");
+    expect(confirm.payout.status).toBe("pending");
+    expect(banking.createPayout).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirm rejects invalid preparation_id", async () => {
+    const banking = stubBanking();
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "confirm_payout", {
+      preparation_id: "prep_bogus",
+    }));
+    expect(result.error).toContain("not found");
+    expect(banking.createPayout).not.toHaveBeenCalled();
   });
 
   it("gracefully handles VOP unavailability", async () => {
@@ -147,17 +153,43 @@ describe("Safe Payout Workflow", () => {
       verifyPayee: vi.fn().mockRejectedValue(new Error("VOP service unavailable")),
     });
 
-    const result = JSON.parse(await handleToolCall({ banking, payments }, "verify_and_send_payout", {
-      source_account_id: "acc-eur",
+    const result = JSON.parse(await handleToolCall({ banking, payments }, "prepare_payout", {
+      ...payoutInput,
       amount: "100.00",
-      currency: "EUR",
-      iban: "DE89370400440532013000",
-      account_holder_name: "Test",
-      reference: "Test ref",
     }));
 
     expect(result.verification.result).toBe("skipped");
-    expect(result.payout.id).toBe("po-new");
+    expect(result.preparation_id).toBeDefined();
+  });
+});
+
+describe("Retry Failed Payout", () => {
+  it("retries a failed payout with new idempotency key", async () => {
+    const banking = stubBanking({
+      getPayout: vi.fn().mockResolvedValue({
+        id: "po-fail", status: "failed", source_account_id: "acc-eur", amount: "200.00", currency: "EUR",
+        destination: { type: "iban", iban: "DE89370400440532013000", account_holder_name: "Hans" },
+        reference: "Retry me", failure: { code: "insufficient_funds", message: "Not enough balance" },
+        created_at: "2026-05-17T10:00:00Z", updated_at: "2026-05-17T10:01:00Z",
+      }),
+    });
+
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "retry_failed_payout", {
+      payout_id: "po-fail",
+    }));
+
+    expect(result.original_payout.status).toBe("failed");
+    expect(result.retried_payout.id).toBe("po-new");
+    expect(banking.createPayout).toHaveBeenCalled();
+  });
+
+  it("refuses to retry a non-failed payout", async () => {
+    const banking = stubBanking();
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "retry_failed_payout", {
+      payout_id: "po-1",
+    }));
+    expect(result.error).toContain("paid");
+    expect(banking.createPayout).not.toHaveBeenCalled();
   });
 });
 
@@ -186,7 +218,7 @@ describe("Treasury Report", () => {
 });
 
 describe("Reconciliation", () => {
-  it("matches deposits against expected payments", async () => {
+  it("matches deposits against expected payments (exact)", async () => {
     const banking = stubBanking();
 
     const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
@@ -197,10 +229,48 @@ describe("Reconciliation", () => {
     }));
 
     expect(result.summary.matched).toBe(1);
+    expect(result.summary.matched_exact).toBe(1);
     expect(result.summary.missing_payments).toBe(1);
     expect(result.summary.unexpected_deposits).toBe(1);
     expect(result.missing_payments.items[0].reference).toBe("INV-002");
     expect(result.unexpected_deposits.items[0].ref).toBe("MYSTERY-PAY");
+  });
+
+  it("fuzzy matches on mangled reference and fee-adjusted amount", async () => {
+    const banking = stubBanking({
+      listDeposits: vi.fn().mockResolvedValue({
+        data: [
+          { id: "dep-f1", status: "received", amount: "999.98", currency: "EUR", bank_statement_reference: "inv-001", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
+        ],
+        has_more: false, next_cursor: null,
+      }),
+    });
+
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
+      expected: [{ reference: "INV-001", amount: "1000.00", currency: "EUR" }],
+    }));
+
+    expect(result.summary.matched).toBe(1);
+    expect(result.summary.matched_fuzzy).toBe(1);
+    expect(result.matched[0].match_type).toBe("fuzzy");
+  });
+
+  it("fuzzy matches when bank truncates or mangles reference", async () => {
+    const banking = stubBanking({
+      listDeposits: vi.fn().mockResolvedValue({
+        data: [
+          { id: "dep-f2", status: "received", amount: "500.00", currency: "EUR", bank_statement_reference: "PAYMENT INV 042 FROM CLIENT", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
+        ],
+        has_more: false, next_cursor: null,
+      }),
+    });
+
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
+      expected: [{ reference: "INV-042", amount: "500.00", currency: "EUR" }],
+    }));
+
+    expect(result.summary.matched).toBe(1);
+    expect(result.summary.matched_fuzzy).toBe(1);
   });
 
   it("reports all clean when everything matches", async () => {
