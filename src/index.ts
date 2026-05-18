@@ -10,22 +10,24 @@ const BANNER = `
 ║                                                              ║
 ║   Treasury Agent — AI-powered programmable money             ║
 ║                                                              ║
-║   Talk naturally to manage your treasury:                    ║
-║   "Show me all my accounts"                                  ║
-║   "What's the EUR/USDC rate for 10,000 euros?"               ║
-║   "Send 500 EUR to DE89370400440532013000"                   ║
-║   "List my recent transactions"                              ║
+║   Banking:  "Show me all my accounts and balances"           ║
+║             "Send 500 EUR to DE89370400440532013000"          ║
+║             "What's the EUR/USDC rate?"                      ║
+║                                                              ║
+║   Payments: "Create a checkout session for 119 EUR"          ║
+║             "Search for banks in Germany"                    ║
+║             "Verify this IBAN before I send money"           ║
 ║                                                              ║
 ║   Type 'exit' to quit                                        ║
 ╚══════════════════════════════════════════════════════════════╝
 `;
 
 async function main() {
-  const augustusToken = process.env.AUGUSTUS_API_KEY;
-  if (!augustusToken) {
+  const bankingToken = process.env.AUGUSTUS_API_KEY;
+  if (!bankingToken) {
     console.error(
       "Missing AUGUSTUS_API_KEY environment variable.\n" +
-        "Get your sandbox API key from the Augustus Dashboard:\n" +
+        "Get your sandbox key from the Augustus Dashboard:\n" +
         "  https://dashboard.augustus.com → Test Mode → Integration\n\n" +
         "Then run:\n" +
         "  AUGUSTUS_API_KEY=your_key npm start",
@@ -36,20 +38,19 @@ async function main() {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error(
       "Missing ANTHROPIC_API_KEY environment variable.\n" +
-        "Get one at https://console.anthropic.com\n\n" +
-        "Then run:\n" +
-        "  ANTHROPIC_API_KEY=your_key AUGUSTUS_API_KEY=your_key npm start",
+        "Get one at https://console.anthropic.com",
     );
     process.exit(1);
   }
 
+  const paymentsKey = process.env.AUGUSTUS_PAYMENTS_API_KEY ?? null;
   const sandbox = process.env.AUGUSTUS_ENV !== "production";
-  const agent = new TreasuryAgent(augustusToken, sandbox);
+  const agent = new TreasuryAgent(bankingToken, paymentsKey, sandbox);
 
   console.log(BANNER);
-  if (sandbox) {
-    console.log("  📋 Running in SANDBOX mode\n");
-  }
+  console.log(`  Mode: ${sandbox ? "SANDBOX" : "PRODUCTION"}`);
+  console.log(`  Banking API: connected`);
+  console.log(`  Payments API: ${paymentsKey ? "connected" : "not configured (set AUGUSTUS_PAYMENTS_API_KEY)"}\n`);
 
   const rl = readline.createInterface({ input, output });
 

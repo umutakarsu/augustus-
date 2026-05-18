@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 
-const SANDBOX_BASE = "https://api.sandbox.augustus.com";
-const PRODUCTION_BASE = "https://api.augustus.com";
+const BANKING_SANDBOX = "https://api.sandbox.augustus.com";
+const BANKING_PRODUCTION = "https://api.augustus.com";
+const PAYMENTS_SANDBOX = "https://api.sand.getivy.de";
+const PAYMENTS_PRODUCTION = "https://api.getivy.de";
 
-export class AugustusClient {
+// --- Banking API Client (new Augustus v1 REST API) ---
+
+export class BankingClient {
   private baseUrl: string;
   private token: string;
 
   constructor(token: string, sandbox = true) {
     this.token = token;
-    this.baseUrl = sandbox ? SANDBOX_BASE : PRODUCTION_BASE;
+    this.baseUrl = sandbox ? BANKING_SANDBOX : BANKING_PRODUCTION;
   }
 
   private async request<T>(
@@ -32,116 +36,281 @@ export class AugustusClient {
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Augustus API ${method} ${path} returned ${res.status}: ${text}`);
+      throw new Error(`Banking API ${method} ${path} → ${res.status}: ${text}`);
     }
 
     return res.json() as Promise<T>;
   }
 
-  // --- Accounts ---
-
-  async listAccounts(params?: {
-    limit?: number;
-    cursor?: string;
-    status?: "pending" | "active" | "frozen";
-  }) {
+  private buildQuery(params: Record<string, string | number | undefined>): string {
     const qs = new URLSearchParams();
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.status) qs.set("status", params.status);
-    const query = qs.toString();
-    return this.request<AccountListResponse>("GET", `/v1/accounts${query ? `?${query}` : ""}`);
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined) qs.set(k, String(v));
+    }
+    const s = qs.toString();
+    return s ? `?${s}` : "";
+  }
+
+  // Accounts
+  async listAccounts(params?: { limit?: number; status?: string }) {
+    const q = this.buildQuery({ limit: params?.limit, status: params?.status });
+    return this.request<PaginatedResponse<Account>>("GET", `/v1/accounts${q}`);
   }
 
   async getAccountBalance(accountId: string) {
     return this.request<AccountBalance>("GET", `/v1/accounts/${accountId}/balance`);
   }
 
-  // --- Transactions ---
-
-  async listTransactions(params?: {
-    limit?: number;
-    cursor?: string;
-    account_id?: string;
+  async createAccount(params: {
+    account_program_id: string;
+    account_type: string;
+    beneficiary_data: BeneficiaryData;
   }) {
-    const qs = new URLSearchParams();
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.account_id) qs.set("account_id", params.account_id);
-    const query = qs.toString();
-    return this.request<TransactionListResponse>("GET", `/v1/transactions${query ? `?${query}` : ""}`);
+    return this.request<Account>("POST", "/v1/accounts", params, randomUUID());
   }
 
-  // --- Payouts ---
+  async freezeAccount(accountId: string) {
+    return this.request<Account>("POST", `/v1/accounts/${accountId}/freeze`, {}, randomUUID());
+  }
 
+  async unfreezeAccount(accountId: string) {
+    return this.request<Account>("POST", `/v1/accounts/${accountId}/unfreeze`, {}, randomUUID());
+  }
+
+  async closeAccount(accountId: string) {
+    return this.request<Account>("POST", `/v1/accounts/${accountId}/close`, {}, randomUUID());
+  }
+
+  // Account Programs
+  async listAccountPrograms(params?: { limit?: number }) {
+    const q = this.buildQuery({ limit: params?.limit });
+    return this.request<PaginatedResponse<AccountProgram>>("GET", `/v1/account_programs${q}`);
+  }
+
+  // Transactions
+  async listTransactions(params?: { limit?: number; account_id?: string }) {
+    const q = this.buildQuery({ limit: params?.limit, account_id: params?.account_id });
+    return this.request<PaginatedResponse<Transaction>>("GET", `/v1/transactions${q}`);
+  }
+
+  // Payouts
   async createPayout(params: {
     source_account_id: string;
     amount: string;
     currency: string;
     destination: PayoutDestination;
     reference: string;
-    metadata?: Record<string, string>;
   }) {
     return this.request<Payout>("POST", "/v1/payouts", params, randomUUID());
   }
 
-  async listPayouts(params?: { limit?: number; cursor?: string }) {
-    const qs = new URLSearchParams();
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    const query = qs.toString();
-    return this.request<PayoutListResponse>("GET", `/v1/payouts${query ? `?${query}` : ""}`);
+  async listPayouts(params?: { limit?: number }) {
+    const q = this.buildQuery({ limit: params?.limit });
+    return this.request<PaginatedResponse<Payout>>("GET", `/v1/payouts${q}`);
   }
 
   async getPayout(payoutId: string) {
     return this.request<Payout>("GET", `/v1/payouts/${payoutId}`);
   }
 
-  // --- Conversions (FX) ---
-
+  // Conversions
   async createConversion(params: {
     source_account_id: string;
     target_account_id: string;
     source_amount: string;
-    metadata?: Record<string, string>;
   }) {
     return this.request<Conversion>("POST", "/v1/conversions", params, randomUUID());
   }
 
-  async listConversions(params?: { limit?: number; cursor?: string }) {
-    const qs = new URLSearchParams();
-    if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    const query = qs.toString();
-    return this.request<ConversionListResponse>("GET", `/v1/conversions${query ? `?${query}` : ""}`);
+  async listConversions(params?: { limit?: number }) {
+    const q = this.buildQuery({ limit: params?.limit });
+    return this.request<PaginatedResponse<Conversion>>("GET", `/v1/conversions${q}`);
   }
 
-  // --- Customers ---
-
-  async searchCustomers(params?: { query?: string; limit?: number }) {
-    const qs = new URLSearchParams();
-    if (params?.query) qs.set("query", params.query);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    const query = qs.toString();
-    return this.request<CustomerListResponse>("GET", `/v1/customers${query ? `?${query}` : ""}`);
+  // Deposits
+  async listDeposits(params?: { limit?: number; status?: string }) {
+    const q = this.buildQuery({ limit: params?.limit, status: params?.status });
+    return this.request<PaginatedResponse<Deposit>>("GET", `/v1/deposits${q}`);
   }
 
-  // --- Quotes ---
+  async getDeposit(depositId: string) {
+    return this.request<Deposit>("GET", `/v1/deposits/${depositId}`);
+  }
 
+  // Returns
+  async createReturn(params: { deposit_id: string; rail?: string }) {
+    return this.request<Return>("POST", "/v1/returns", params, randomUUID());
+  }
+
+  async listReturns(params?: { limit?: number }) {
+    const q = this.buildQuery({ limit: params?.limit });
+    return this.request<PaginatedResponse<Return>>("GET", `/v1/returns${q}`);
+  }
+
+  // Quotes
   async getQuote(params: {
     source_currency: string;
     target_currency: string;
     source_amount?: string;
   }) {
-    const qs = new URLSearchParams();
-    qs.set("source_currency", params.source_currency);
-    qs.set("target_currency", params.target_currency);
-    if (params.source_amount) qs.set("source_amount", params.source_amount);
-    return this.request<Quote>("GET", `/v1/quotes/indicative?${qs.toString()}`);
+    const q = this.buildQuery(params);
+    return this.request<Quote>("GET", `/v1/quotes/indicative${q}`);
+  }
+
+  // Customers
+  async searchCustomers(params?: { query?: string; limit?: number }) {
+    const q = this.buildQuery({ query: params?.query, limit: params?.limit });
+    return this.request<PaginatedResponse<Customer>>("GET", `/v1/customers${q}`);
+  }
+
+  // Webhook Subscriptions
+  async createWebhookSubscription(params: { url: string; events: string[] }) {
+    return this.request<WebhookSubscription>("POST", "/v1/webhook_subscriptions", params, randomUUID());
+  }
+
+  async listWebhookSubscriptions() {
+    return this.request<PaginatedResponse<WebhookSubscription>>("GET", "/v1/webhook_subscriptions");
+  }
+
+  async deleteWebhookSubscription(id: string) {
+    return this.request<void>("DELETE", `/v1/webhook_subscriptions/${id}`);
   }
 }
 
-// --- Types ---
+// --- Payments API Client (legacy Ivy API) ---
+
+export class PaymentsClient {
+  private baseUrl: string;
+  private apiKey: string;
+
+  constructor(apiKey: string, sandbox = true) {
+    this.apiKey = apiKey;
+    this.baseUrl = sandbox ? PAYMENTS_SANDBOX : PAYMENTS_PRODUCTION;
+  }
+
+  private async request<T>(path: string, body: unknown, idempotencyKey?: string): Promise<T> {
+    const headers: Record<string, string> = {
+      "X-Ivy-Api-Key": this.apiKey,
+      "Content-Type": "application/json",
+    };
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Payments API ${path} → ${res.status}: ${text}`);
+    }
+
+    return res.json() as Promise<T>;
+  }
+
+  // Checkout Sessions
+  async createCheckoutSession(params: {
+    price: { total: number; currency: string };
+    referenceId: string;
+    successCallbackUrl: string;
+    errorCallbackUrl: string;
+    paymentSchemeSelection?: string;
+    market?: string;
+    customer?: { email?: string };
+    metadata?: Record<string, string>;
+  }) {
+    return this.request<CheckoutSession>(
+      "/api/service/checkout/session/create",
+      params,
+      randomUUID(),
+    );
+  }
+
+  async retrieveCheckoutSession(id: string) {
+    return this.request<CheckoutSession>("/api/service/checkout/session/details", { id });
+  }
+
+  async expireCheckoutSession(id: string) {
+    return this.request<CheckoutSession>("/api/service/checkout/session/expire", { id });
+  }
+
+  // Orders
+  async createOrder(params: {
+    amount: number;
+    currency: string;
+    referenceId: string;
+    customer?: { email?: string };
+  }) {
+    return this.request<Order>("/api/service/order/create", params, randomUUID());
+  }
+
+  async retrieveOrder(id: string) {
+    return this.request<Order>("/api/service/order/details", { id });
+  }
+
+  async expireOrder(id: string) {
+    return this.request<Order>("/api/service/order/expire", { id });
+  }
+
+  // Refunds
+  async createRefund(params: {
+    orderId?: string;
+    referenceId?: string;
+    amount: number;
+  }) {
+    return this.request<Refund>("/api/service/refund/create", params, randomUUID());
+  }
+
+  async retrieveRefund(id: string) {
+    return this.request<Refund>("/api/service/refund/retrieve", { id });
+  }
+
+  // FX
+  async getExchangeRate(params: {
+    sourceCurrency: string;
+    targetCurrency: string;
+    sourceAmount?: string;
+  }) {
+    return this.request<FxRate>("/api/service/fx/retrieve-rate", params);
+  }
+
+  async executeFx(params: {
+    sourceAccountId: string;
+    targetAccountId: string;
+    sourceAmount: string;
+  }) {
+    return this.request<FxExecution>("/api/service/fx/execute", params, randomUUID());
+  }
+
+  // Bank Search
+  async searchBanks(params?: { search?: string; market?: string; currency?: string }) {
+    return this.request<BankSearchResponse>("/api/service/banks/search", params ?? {});
+  }
+
+  // Verification of Payee
+  async verifyPayee(params: {
+    payee: {
+      type: "iban";
+      iban: { accountHolderName: string; iban: string; bic?: string };
+    };
+  }) {
+    return this.request<VopResult>("/api/service/payee/verify", params);
+  }
+
+  // Capabilities
+  async getCapabilities(market: string) {
+    return this.request<CapabilitiesResponse>("/api/service/merchant/capabilities/details", { market });
+  }
+}
+
+// --- Banking API Types ---
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
 
 export interface Account {
   id: string;
@@ -174,10 +343,26 @@ export interface AccountBalance {
   as_of: string;
 }
 
-interface AccountListResponse {
-  data: Account[];
-  has_more: boolean;
-  next_cursor: string | null;
+interface BeneficiaryData {
+  legal_name: string;
+  date_of_birth: string;
+  country_of_citizenship: string;
+  residential_address: {
+    street_line_1: string;
+    city: string;
+    postal_code: string;
+    country: string;
+  };
+  identification: { type: string; value: string };
+}
+
+interface AccountProgram {
+  id: string;
+  type: string;
+  label: string;
+  account_program_type: string;
+  status: string;
+  created_at: string;
 }
 
 interface Transaction {
@@ -190,13 +375,7 @@ interface Transaction {
   created_at: string;
 }
 
-interface TransactionListResponse {
-  data: Transaction[];
-  has_more: boolean;
-  next_cursor: string | null;
-}
-
-type PayoutDestination =
+export type PayoutDestination =
   | { type: "iban"; iban: string; account_holder_name: string; bic?: string }
   | { type: "sort_code"; sort_code: string; account_number: string; account_holder_name: string }
   | { type: "crypto"; address: string; blockchain: string };
@@ -214,12 +393,6 @@ export interface Payout {
   updated_at: string;
 }
 
-interface PayoutListResponse {
-  data: Payout[];
-  has_more: boolean;
-  next_cursor: string | null;
-}
-
 interface Conversion {
   id: string;
   status: string;
@@ -233,10 +406,40 @@ interface Conversion {
   completed_at: string | null;
 }
 
-interface ConversionListResponse {
-  data: Conversion[];
-  has_more: boolean;
-  next_cursor: string | null;
+interface Deposit {
+  id: string;
+  type: string;
+  status: string;
+  amount: string;
+  currency: string;
+  source: unknown;
+  destination_account_id: string;
+  bank_statement_reference: string;
+  rail: string;
+  tx_hash?: string;
+  returns: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+interface Return {
+  id: string;
+  type: string;
+  status: string;
+  deposit_id: string;
+  amount: string;
+  currency: string;
+  failure: { code: string; message: string; retry: boolean } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface Quote {
+  source_currency: string;
+  target_currency: string;
+  rate: string;
+  source_amount?: string;
+  target_amount?: string;
 }
 
 interface Customer {
@@ -246,16 +449,81 @@ interface Customer {
   created_at: string;
 }
 
-interface CustomerListResponse {
-  data: Customer[];
-  has_more: boolean;
-  next_cursor: string | null;
+interface WebhookSubscription {
+  id: string;
+  type: string;
+  url: string;
+  events: string[];
+  created_at: string;
+  updated_at: string;
 }
 
-interface Quote {
-  source_currency: string;
-  target_currency: string;
+// --- Payments API Types ---
+
+interface CheckoutSession {
+  id: string;
+  status: string;
+  redirectUrl: string;
+  referenceId: string;
+  price: { total: number; currency: string };
+  merchant: { legalName: string };
+  market: string;
+  created: number;
+  expiresAt: number;
+}
+
+interface Order {
+  id: string;
+  status: string;
+  referenceId: string;
+  price: { total: number; currency: string };
+  destination?: { bankStatementReference: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface Refund {
+  id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  orderId: string;
+  transactionId: string;
+}
+
+interface FxRate {
   rate: string;
-  source_amount?: string;
-  target_amount?: string;
+  sourceAmount?: string;
+  targetAmount?: string;
+}
+
+interface FxExecution {
+  id: string;
+  rate: string;
+  sourceAmount: string;
+  targetAmount: string;
+  sourceCurrency: string;
+  targetCurrency: string;
+  status: string;
+}
+
+interface BankSearchResponse {
+  banks: Array<{
+    id: string;
+    name: string;
+    logo: string;
+    market: string;
+    currencies: string[];
+  }>;
+  count: number;
+  hasNext: boolean;
+}
+
+interface VopResult {
+  status: "match" | "partial_match" | "no_match" | "not_available";
+  suggestedAccountHolderName?: string;
+}
+
+interface CapabilitiesResponse {
+  capabilities: string[];
 }

@@ -1,91 +1,104 @@
 # Augustus Treasury Agent
 
-An AI-powered treasury management agent built on the [Augustus](https://augustus.com) Banking API. Talk naturally to manage accounts, send payouts, convert currencies, and monitor transactions — proving the "clearing bank for the AI era" thesis.
+An AI agent that covers the **entire Augustus platform** — both the Banking API and the Payments API — through natural language. Built to prove the "clearing bank for the AI era" thesis.
 
 ## What it does
 
-The agent connects Claude to the Augustus API through tool use, enabling natural-language treasury operations:
+33 tools across two APIs, all accessible through conversation:
 
 ```
-you > Show me all my accounts and their balances
+you > Create a checkout session for 119 EUR, order ref SHOP-4821
 
-  ⚡ list accounts... done
-  ⚡ get account balance... done
-  ⚡ get account balance... done
+  ⚡ create checkout session... done
 
-augustus > Here's your account overview:
+augustus > Checkout session created:
+  ID:        cs_8f3a2b...
+  Amount:    €119.00
+  Status:    open
+  Redirect:  https://checkout.augustus.com/cs_8f3a2b...
 
-  Account               Currency   Balance      Status
-  ─────────────────────────────────────────────────────
-  EUR Operating          EUR       €24,500.00   active
-  USDC Wallet            USDC      $12,340.50   active
-  GBP Settlements        GBP       £3,200.00    active
+  Send this redirect URL to your customer to complete payment.
 ```
 
 ```
-you > Convert 5,000 EUR to USDC
+you > Verify that Hans Mueller owns DE89370400440532013000 before I send the payout
 
-  ⚡ get exchange rate... done
+  ⚡ verify payee... done
 
-augustus > Current rate: 1 EUR = 1.0847 USDC
-  Converting €5,000.00 → ~5,423.50 USDC
-  Shall I proceed with this conversion?
+augustus > VOP result: ✓ match
+  The account holder name "Hans Mueller" matches the bank records
+  for IBAN DE89370400440532013000. Safe to proceed with the payout.
 ```
 
-### Supported operations
+### Banking API (Augustus v1)
 
-| Command | What it does |
-|---------|-------------|
-| List accounts | View all fiat and crypto accounts with status |
-| Check balances | Real-time balance for any account |
-| List transactions | Transaction history with filtering |
-| Send payouts | IBAN, UK sort code, or crypto wallet transfers |
-| Exchange rates | Live FX quotes (EUR, GBP, USD, USDC) |
-| Convert currency | Execute fiat ↔ stablecoin conversions |
-| Track payouts | Monitor payout status (pending → paid) |
-| Search customers | Find customers by name or email |
+| Tool | Description |
+|------|-------------|
+| `list_accounts` | View all fiat and crypto accounts |
+| `get_account_balance` | Real-time balance for any account |
+| `create_account` | Create virtual accounts under programs |
+| `freeze_account` / `unfreeze_account` / `close_account` | Account lifecycle management |
+| `list_account_programs` | View FBO programs |
+| `list_transactions` | Transaction history with filtering |
+| `create_payout` | Send to IBAN, UK sort code, or crypto wallet |
+| `list_payouts` / `get_payout_status` | Track payout lifecycle |
+| `get_exchange_rate` | Live FX quotes (EUR, GBP, USD, USDC) |
+| `convert_currency` / `list_conversions` | Execute and track FX conversions |
+| `list_deposits` / `get_deposit` | Monitor incoming deposits |
+| `create_return` / `list_returns` | Return deposits to senders |
+| `search_customers` | Find customers by name or email |
+| `create_webhook_subscription` / `list_webhook_subscriptions` / `delete_webhook_subscription` | Manage real-time event notifications |
+
+### Payments API (Ivy legacy)
+
+| Tool | Description |
+|------|-------------|
+| `create_checkout_session` / `get_checkout_session` / `expire_checkout_session` | Open Banking checkout with redirect flow |
+| `create_order` / `get_order` / `expire_order` | Manual bank transfer orders |
+| `create_refund` / `get_refund` | Full or partial refunds |
+| `search_banks` | Find supported banks by country/currency |
+| `verify_payee` | SEPA Verification of Payee (VOP) |
+| `get_capabilities` | Check AIS/PIS support per market |
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│   User       │────▶│  Claude (Sonnet)  │────▶│  Augustus API    │
-│   Terminal   │◀────│  + Tool Use       │◀────│  Banking v1      │
-└─────────────┘     └──────────────────┘     └──────────────────┘
-                           │
-                    Maps natural language
-                    to API operations with
-                    confirmation for writes
+┌─────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
+│   Terminal   │────▶│  Claude Sonnet   │────▶│  Augustus Banking API    │
+│   (you)      │◀────│  + 33 Tools      │────▶│  Augustus Payments API   │
+└─────────────┘     └──────────────────┘     └──────────────────────────┘
 ```
 
-- **Claude Sonnet** interprets user intent and selects the right API calls
-- **Tool definitions** map 1:1 to Augustus Banking API endpoints
-- **Confirmation loop** — the agent always confirms before executing payouts or conversions
-- **Conversation memory** — multi-turn context for follow-up questions
+- **Claude Sonnet** maps natural language to the right API calls
+- **33 tool definitions** cover both APIs end to end
+- **Idempotency keys** on all write operations (payouts, conversions, returns, refunds, checkouts, orders)
+- **Confirmation loop** — always confirms before moving money
+- **Conversation memory** with sliding window (40 messages)
 
 ## Setup
 
 ```bash
-# Install dependencies
 npm install
-
-# Build
 npm run build
 
-# Run (sandbox mode by default)
+# Banking API only
 ANTHROPIC_API_KEY=sk-ant-... AUGUSTUS_API_KEY=your_key npm start
+
+# Full platform (Banking + Payments)
+ANTHROPIC_API_KEY=sk-ant-... AUGUSTUS_API_KEY=your_key AUGUSTUS_PAYMENTS_API_KEY=your_key npm start
 ```
 
 ### Environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API key from [console.anthropic.com](https://console.anthropic.com) |
-| `AUGUSTUS_API_KEY` | Yes | Augustus API key from Dashboard → Test Mode → Integration |
-| `AUGUSTUS_ENV` | No | Set to `production` for live API (default: `sandbox`) |
+| `ANTHROPIC_API_KEY` | Yes | Claude API key |
+| `AUGUSTUS_API_KEY` | Yes | Banking API key (Bearer token) |
+| `AUGUSTUS_PAYMENTS_API_KEY` | No | Payments API key (enables checkout, orders, refunds, VOP) |
+| `AUGUSTUS_ENV` | No | Set to `production` for live APIs (default: `sandbox`) |
 
 ## Why this exists
 
-Augustus positions itself as "the clearing bank for the AI era" — purpose-built around programmable money and AI. This agent is a concrete demonstration of that thesis: an AI that can reason about treasury operations and execute them through the Augustus API, turning natural language into programmable money flows.
+Augustus is "the clearing bank for the AI era." This agent makes that real: an AI that understands the full platform — treasury management, payment acceptance, FX, compliance checks — and operates it through natural language.
 
-Built with the Augustus Banking API (v1, `2026-05-01`) and Claude tool use.
+Built with the Augustus Banking API (v1, `2026-05-01`), Augustus Payments API, and Claude tool use.

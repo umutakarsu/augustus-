@@ -1,38 +1,51 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { AugustusClient } from "./augustus-client.js";
+import { BankingClient, PaymentsClient } from "./augustus-client.js";
 import { tools } from "./tools.js";
 import { handleToolCall } from "./tool-handler.js";
 
-const SYSTEM_PROMPT = `You are Augustus Treasury, an AI assistant for managing treasury operations on the Augustus platform — the clearing bank for the AI era.
+const SYSTEM_PROMPT = `You are Augustus Treasury, an AI assistant for the Augustus platform — the clearing bank for the AI era.
 
-You help users manage their accounts, monitor balances, track transactions, send payouts, convert currencies (fiat ↔ stablecoin), and check exchange rates — all through natural language.
+You have access to BOTH of Augustus's APIs:
 
-Capabilities:
-- View accounts and balances (fiat: EUR, GBP, USD / crypto: USDC)
+**Banking API** (accounts, treasury, FX):
+- View and manage accounts (fiat: EUR, GBP, USD / crypto: USDC)
+- Create virtual accounts under account programs
+- Freeze, unfreeze, and close accounts
 - List and filter transactions
-- Send payouts to bank accounts (IBAN, UK sort code) or crypto wallets
+- Send payouts to IBAN, UK sort code, or crypto wallets
 - Get live FX rates and execute currency conversions
-- Search customers
-- Track payout statuses
+- Monitor incoming deposits and process returns
+- Manage webhook subscriptions
+
+**Payments API** (checkout, orders, refunds):
+- Create Open Banking checkout sessions with redirect URLs
+- Create manual bank transfer orders
+- Track order lifecycle (waiting_for_payment → processing → paid)
+- Issue full or partial refunds
+- Search supported banks by country and currency
+- Verify payee identity (VOP) before sending payments
+- Check market capabilities (AIS/PIS)
 
 Guidelines:
-- Always confirm before executing payouts or conversions — summarize amount, destination, and currency first
-- Format monetary amounts clearly with currency symbols
-- When listing accounts, show the label, currency, status, and key identifiers (IBAN, wallet address)
-- For transactions, show a clean summary: date, amount, direction (in/out), and reference
-- If an API call fails, explain the error clearly and suggest what to try next
-- Be concise but thorough — this is a treasury tool, accuracy matters`;
+- Always confirm before executing writes (payouts, conversions, returns, refunds, account changes)
+- Format monetary amounts with currency symbols
+- For checkout sessions, always show the redirect URL prominently
+- When verifying payees, explain what match/partial_match/no_match means
+- If an API call fails, explain the error and suggest what to try next
+- Be concise but thorough — this is a payments tool, accuracy matters`;
 
 const MAX_HISTORY_MESSAGES = 40;
 
 export class TreasuryAgent {
   private anthropic: Anthropic;
-  private augustus: AugustusClient;
+  private banking: BankingClient;
+  private payments: PaymentsClient | null;
   private conversationHistory: Anthropic.MessageParam[] = [];
 
-  constructor(augustusToken: string, sandbox = true) {
+  constructor(bankingToken: string, paymentsKey: string | null, sandbox = true) {
     this.anthropic = new Anthropic();
-    this.augustus = new AugustusClient(augustusToken, sandbox);
+    this.banking = new BankingClient(bankingToken, sandbox);
+    this.payments = paymentsKey ? new PaymentsClient(paymentsKey, sandbox) : null;
   }
 
   private trimHistory() {
@@ -57,39 +70,27 @@ export class TreasuryAgent {
     });
 
     while (response.stop_reason === "tool_use") {
-      const toolUseBlocks = response.content.filter(
-        (b) => b.type === "tool_use",
-      );
+      const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
 
-      this.conversationHistory.push({
-        role: "assistant",
-        content: response.content,
-      });
+      this.conversationHistory.push({ role: "assistant", content: response.content });
 
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const block of toolUseBlocks) {
         if (block.type !== "tool_use") continue;
-        const name = block.name;
-        const input = block.input as Record<string, unknown>;
 
-        process.stdout.write(`  ⚡ ${formatToolName(name)}...`);
+        process.stdout.write(`  ⚡ ${block.name.replace(/_/g, " ")}...`);
 
         let result: string;
         try {
-          result = await handleToolCall(this.augustus, name, input);
+          result = await handleToolCall(this.banking, this.payments, block.name, block.input as Record<string, unknown>);
           process.stdout.write(" done\n");
         } catch (err) {
-          const message =
-            err instanceof Error ? err.message : "Unknown error";
+          const message = err instanceof Error ? err.message : "Unknown error";
           result = JSON.stringify({ error: message });
-          process.stdout.write(` error\n`);
+          process.stdout.write(" error\n");
         }
 
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: result,
-        });
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
       }
 
       this.conversationHistory.push({ role: "user", content: toolResults });
@@ -106,15 +107,8 @@ export class TreasuryAgent {
     const textBlocks = response.content.filter((b) => b.type === "text");
     const reply = textBlocks.map((b) => ("text" in b ? b.text : "")).join("\n");
 
-    this.conversationHistory.push({
-      role: "assistant",
-      content: response.content,
-    });
+    this.conversationHistory.push({ role: "assistant", content: response.content });
 
     return reply;
   }
-}
-
-function formatToolName(name: string): string {
-  return name.replace(/_/g, " ");
 }
