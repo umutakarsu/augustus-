@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Augustus Treasury Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #1a1a1a;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: -0.01em;
+  }
+
+  header h1 span {
+    font-size: 12px;
+    color: #666;
+    font-weight: 400;
+    margin-left: 8px;
+  }
+
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+  }
+
+  .tab-bar button {
+    background: none;
+    border: 1px solid #222;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: #666;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .tab-bar button.active {
+    background: #1a1a1a;
+    color: #fff;
+    border-color: #333;
+  }
+
+  .tab-bar button:hover:not(.active) { color: #999; }
+
+  /* ── Chat view ─────────────────────────── */
+
+  #chat-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .msg {
+    max-width: 720px;
+    width: 100%;
+    line-height: 1.6;
+    font-size: 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .msg.user {
+    align-self: flex-end;
+    background: #1a1a2e;
+    border: 1px solid #252540;
+    padding: 12px 16px;
+    border-radius: 12px 12px 4px 12px;
+    color: #c8c8ff;
+  }
+
+  .msg.assistant { align-self: flex-start; }
+  .msg.assistant .text { padding: 12px 0; }
+
+  .tool-status {
+    font-size: 12px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    padding: 4px 0;
+    color: #666;
+  }
+
+  .tool-status.running::before {
+    content: "⟳ ";
+    animation: spin 1s linear infinite;
+  }
+  .tool-status.done::before { content: "✓ "; color: #4a9; }
+  .tool-status.error::before { content: "✗ "; color: #c44; }
+
+  @keyframes spin {
+    from { opacity: 1; } 50% { opacity: 0.3; } to { opacity: 1; }
+  }
+
+  .error-msg { color: #c44; font-size: 13px; padding: 8px 0; }
+
+  #input-bar {
+    padding: 16px 24px;
+    border-top: 1px solid #1a1a1a;
+    flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+  }
+
+  #input-bar input {
+    flex: 1;
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: #e0e0e0;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+  }
+
+  #input-bar input:focus { border-color: #333; }
+  #input-bar input::placeholder { color: #444; }
+
+  #input-bar button {
+    background: #fff;
+    color: #000;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  #input-bar button:disabled { opacity: 0.3; cursor: not-allowed; }
+  #input-bar button:hover:not(:disabled) { background: #ddd; }
+
+  /* ── Architecture view ─────────────────── */
+
+  #arch-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 40px 24px;
+    display: none;
+  }
+
+  #arch-view.visible { display: block; }
+  #chat-view.hidden { display: none; }
+
+  .arch-container {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .arch-container h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 32px;
+    text-align: center;
+  }
+
+  /* Diagram */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 48px;
+  }
+
+  .layer {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    width: 100%;
+  }
+
+  .box {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 14px 20px;
+    text-align: center;
+    min-width: 140px;
+  }
+
+  .box .label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+
+  .box .sub {
+    font-size: 11px;
+    color: #666;
+    font-family: "SF Mono", "Fira Code", monospace;
+  }
+
+  .box.highlight {
+    border-color: #335;
+    background: #0d0d1a;
+  }
+
+  .box.api-banking { border-color: #294; background: #0a1a0f; }
+  .box.api-payments { border-color: #a64; background: #1a140a; }
+
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 0;
+    color: #333;
+    font-size: 11px;
+  }
+
+  .arrow .line {
+    width: 1px;
+    height: 16px;
+    background: #333;
+  }
+
+  .arrow .label-text {
+    color: #555;
+    font-size: 10px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    padding: 2px 0;
+  }
+
+  .arrow-fork {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 120px;
+    position: relative;
+    padding-top: 8px;
+  }
+
+  .arrow-fork::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: calc(50% - 68px);
+    width: 136px;
+    height: 1px;
+    background: #333;
+  }
+
+  .arrow-fork .branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .arrow-fork .branch .line {
+    width: 1px;
+    height: 12px;
+    background: #333;
+  }
+
+  /* Details section */
+  .details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  .detail-card {
+    background: #111;
+    border: 1px solid #1a1a1a;
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  .detail-card h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+
+  .detail-card p, .detail-card li {
+    font-size: 12px;
+    color: #888;
+    line-height: 1.7;
+  }
+
+  .detail-card ul {
+    padding-left: 16px;
+  }
+
+  .detail-card.full { grid-column: 1 / -1; }
+
+  .tag {
+    display: inline-block;
+    font-size: 10px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: #1a1a1a;
+    color: #888;
+    margin-right: 4px;
+  }
+
+  .tag.green { background: #0a1a0f; color: #4a9; border: 1px solid #294; }
+  .tag.amber { background: #1a140a; color: #ca8; border: 1px solid #a64; }
+  .tag.blue  { background: #0d0d1a; color: #88c; border: 1px solid #335; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Augustus Treasury Agent <span>sandbox</span></h1>
+  <div class="tab-bar">
+    <button class="active" onclick="showTab('chat')">Chat</button>
+    <button onclick="showTab('arch')">Architecture</button>
+  </div>
+</header>
+
+<!-- ── Chat ──────────────────────────────── -->
+
+<div id="chat-view">
+  <div id="messages"></div>
+  <form id="input-bar">
+    <input type="text" id="input" placeholder="Ask something..." autocomplete="off" autofocus>
+    <button type="submit" id="send">Send</button>
+  </form>
+</div>
+
+<!-- ── Architecture ──────────────────────── -->
+
+<div id="arch-view">
+  <div class="arch-container">
+    <h2>System Architecture</h2>
+
+    <div class="diagram">
+      <!-- Browser -->
+      <div class="layer">
+        <div class="box highlight">
+          <div class="label">Browser</div>
+          <div class="sub">Chat UI · SSE client</div>
+        </div>
+      </div>
+
+      <div class="arrow">
+        <div class="line"></div>
+        <div class="label-text">POST /api/chat → SSE stream</div>
+        <div class="line"></div>
+      </div>
+
+      <!-- Server -->
+      <div class="layer">
+        <div class="box">
+          <div class="label">Web Server</div>
+          <div class="sub">node:http · no deps</div>
+        </div>
+      </div>
+
+      <div class="arrow">
+        <div class="line"></div>
+        <div class="label-text">emit(type, data)</div>
+        <div class="line"></div>
+      </div>
+
+      <!-- Agent -->
+      <div class="layer">
+        <div class="box highlight">
+          <div class="label">Treasury Agent</div>
+          <div class="sub">Claude Sonnet 4 · streaming</div>
+        </div>
+      </div>
+
+      <div class="arrow">
+        <div class="line"></div>
+        <div class="label-text">tool_use → execute → tool_result → loop</div>
+        <div class="line"></div>
+      </div>
+
+      <!-- Tool Handler -->
+      <div class="layer">
+        <div class="box">
+          <div class="label">Tool Handler</div>
+          <div class="sub">14 tools · business logic</div>
+        </div>
+      </div>
+
+      <div class="arrow">
+        <div class="line"></div>
+        <div class="line"></div>
+      </div>
+
+      <!-- API fork -->
+      <div class="arrow-fork">
+        <div class="branch">
+          <div class="line"></div>
+          <div class="box api-banking">
+            <div class="label">Banking API</div>
+            <div class="sub">api.augustus.com/v1</div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="line"></div>
+          <div class="box api-payments">
+            <div class="label">Payments API</div>
+            <div class="sub">api.getivy.de</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Details -->
+    <div class="details">
+      <div class="detail-card">
+        <h3>Two-Phase Payouts</h3>
+        <p>
+          <span class="tag blue">prepare_payout</span> runs VOP + balance check, returns a preparation_id. No money moves.
+          <span class="tag blue">confirm_payout</span> fires the transfer after user confirmation.
+          Preparations expire after 5 minutes.
+        </p>
+      </div>
+
+      <div class="detail-card">
+        <h3>Fuzzy Reconciliation</h3>
+        <p>
+          Exact match first, then case-insensitive partial reference matching with amount tolerance.
+          Amounts over 1000 require exact match. Fuzzy matches over 10k are flagged for manual review.
+        </p>
+      </div>
+
+      <div class="detail-card">
+        <h3>FX Slippage Protection</h3>
+        <p>
+          Pre-trade quote → execute → compare actual rate vs quoted rate.
+          Warns if slippage exceeds 0.5%. Uses integer-cent math to avoid floating-point drift.
+        </p>
+      </div>
+
+      <div class="detail-card">
+        <h3>Treasury Report</h3>
+        <p>
+          Parallel fetch of accounts, balances, payouts, transactions.
+          Flags: zero balances, stale pending payouts (>24h), failed payouts, large transactions (>10k).
+        </p>
+      </div>
+
+      <div class="detail-card">
+        <h3>Dual API Architecture</h3>
+        <ul>
+          <li><span class="tag green">Banking</span> REST · Bearer JWT · accounts, payouts, FX, deposits</li>
+          <li><span class="tag amber">Payments</span> All POST · API key · checkout, VOP, refunds, banks</li>
+          <li>Payments API is optional — agent degrades gracefully without it</li>
+        </ul>
+      </div>
+
+      <div class="detail-card">
+        <h3>Safety</h3>
+        <ul>
+          <li>Idempotency keys on all write operations</li>
+          <li>Streaming responses via SSE (no silent waits)</li>
+          <li>VOP failure → skip, don't block</li>
+          <li>Retry tool validates <span class="tag">status: failed</span> before re-sending</li>
+          <li>19 tests covering failure paths</li>
+        </ul>
+      </div>
+
+      <div class="detail-card full">
+        <h3>Tool Use Loop</h3>
+        <p>
+          User message → Claude decides which tools to call → tool handler executes against Augustus APIs →
+          results fed back to Claude → Claude calls more tools or responds.
+          The loop repeats until Claude produces a final text response.
+          History capped at 40 messages with sliding window.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── Tab switching ─────────────────────── */
+
+function showTab(tab) {
+  const chatView = document.getElementById("chat-view");
+  const archView = document.getElementById("arch-view");
+  const buttons = document.querySelectorAll(".tab-bar button");
+
+  if (tab === "arch") {
+    chatView.classList.add("hidden");
+    archView.classList.add("visible");
+    buttons[0].classList.remove("active");
+    buttons[1].classList.add("active");
+  } else {
+    chatView.classList.remove("hidden");
+    archView.classList.remove("visible");
+    buttons[0].classList.add("active");
+    buttons[1].classList.remove("active");
+    document.getElementById("input").focus();
+  }
+}
+
+/* ── Chat logic ────────────────────────── */
+
+const messages = document.getElementById("messages");
+const input = document.getElementById("input");
+const send = document.getElementById("send");
+const form = document.getElementById("input-bar");
+
+let busy = false;
+
+function scrollToBottom() {
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addUserMessage(text) {
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.textContent = text;
+  messages.appendChild(div);
+  scrollToBottom();
+}
+
+function createAssistantMessage() {
+  const div = document.createElement("div");
+  div.className = "msg assistant";
+  const textEl = document.createElement("div");
+  textEl.className = "text";
+  div.appendChild(textEl);
+  messages.appendChild(div);
+  return { container: div, textEl };
+}
+
+async function sendMessage(text) {
+  if (busy || !text.trim()) return;
+  busy = true;
+  send.disabled = true;
+  input.disabled = true;
+
+  addUserMessage(text);
+  const { container, textEl } = createAssistantMessage();
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Request failed" }));
+      textEl.innerHTML = '<span class="error-msg">' + (err.error || "Request failed") + '</span>';
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let currentToolEl = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        let event;
+        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+        switch (event.type) {
+          case "text":
+            textEl.textContent += event.content;
+            scrollToBottom();
+            break;
+
+          case "tool_start":
+            currentToolEl = document.createElement("div");
+            currentToolEl.className = "tool-status running";
+            currentToolEl.textContent = event.content;
+            container.insertBefore(currentToolEl, textEl);
+            scrollToBottom();
+            break;
+
+          case "tool_done":
+            if (currentToolEl) {
+              currentToolEl.className = "tool-status done";
+              currentToolEl = null;
+            }
+            break;
+
+          case "tool_error":
+            if (currentToolEl) {
+              currentToolEl.className = "tool-status error";
+              currentToolEl = null;
+            }
+            break;
+
+          case "error":
+            textEl.innerHTML += '<span class="error-msg">' + event.content + '</span>';
+            scrollToBottom();
+            break;
+
+          case "done":
+            break;
+        }
+      }
+    }
+  } catch (err) {
+    textEl.innerHTML = '<span class="error-msg">Connection error: ' + err.message + '</span>';
+  } finally {
+    busy = false;
+    send.disabled = false;
+    input.disabled = false;
+    input.focus();
+    scrollToBottom();
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value;
+  input.value = "";
+  sendMessage(text);
+});
+</script>
+</body>
+</html>

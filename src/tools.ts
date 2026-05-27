@@ -90,7 +90,7 @@ export const tools: Anthropic.Tool[] = [
   // ── Workflow: Deposit → Reconciliation ─────────────────────────────
 
   tool("reconcile_deposits",
-    "Pull recent deposits and cross-reference them against expected payments. Uses fuzzy matching: case-insensitive substring on references, ±0.02 tolerance on amounts (covers rounding/fee differences). Lists matched deposits, unmatched deposits (received but not expected), and missing payments (expected but not received).",
+    "Pull recent deposits and cross-reference them against expected payments. Uses fuzzy matching on small amounts (under 1000): case-insensitive substring on references, configurable tolerance on amounts. Amounts over 1000 require exact match to prevent false positives on large transfers. Fuzzy matches on amounts over 10k are flagged for manual review.",
     {
       expected: {
         type: "array",

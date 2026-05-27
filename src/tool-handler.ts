@@ -385,8 +385,20 @@ function refsMatch(expected: string, actual: string): boolean {
   return a === b || b.includes(a) || a.includes(b);
 }
 
-function amountsMatch(expected: string, actual: string, tolerance: number): boolean {
-  return Math.abs(parseFloat(expected) - parseFloat(actual)) <= tolerance;
+function amountsMatch(expected: string, actual: string, toleranceAbs: number): { match: boolean; diff: number } {
+  // Compare as integers of cents to avoid floating-point drift.
+  const toCents = (s: string) => Math.round(parseFloat(s) * 100);
+  const expCents = toCents(expected);
+  const actCents = toCents(actual);
+  const diffCents = Math.abs(expCents - actCents);
+  const toleranceCents = Math.round(toleranceAbs * 100);
+
+  // Fixed tolerance only applies to small amounts (under 1000).
+  // Above that, require exact match — a fuzzy match on a 500k transfer
+  // against the wrong deposit is an expensive mistake.
+  if (expCents >= 100_000) return { match: diffCents === 0, diff: diffCents / 100 };
+
+  return { match: diffCents <= toleranceCents, diff: diffCents / 100 };
 }
 
 async function reconcileDeposits(banking: BankingClient, input: In): Promise<string> {
@@ -397,7 +409,7 @@ async function reconcileDeposits(banking: BankingClient, input: In): Promise<str
   const depositsRes = await banking.listDeposits({ limit });
   const deposits = depositsRes.data;
 
-  const matched: Array<{ expected: ExpectedPayment; deposit_id: string; deposit_amount: string; match_type: string }> = [];
+  const matched: Array<{ expected: ExpectedPayment; deposit_id: string; deposit_amount: string; match_type: string; warning?: string }> = [];
   const unmatchedDeposits: typeof deposits = [];
   const unmatchedExpected: ExpectedPayment[] = [];
   const usedDeposits = new Set<string>();
@@ -420,18 +432,25 @@ async function reconcileDeposits(banking: BankingClient, input: In): Promise<str
           !usedDeposits.has(d.id) &&
           d.currency === exp.currency &&
           refsMatch(exp.reference, d.bank_statement_reference) &&
-          amountsMatch(exp.amount, d.amount, tolerance),
+          amountsMatch(exp.amount, d.amount, tolerance).match,
       );
       matchType = "fuzzy";
     }
 
     if (match) {
-      matched.push({
+      const entry: (typeof matched)[number] = {
         expected: exp,
         deposit_id: match.id,
         deposit_amount: `${match.amount} ${match.currency}`,
         match_type: matchType,
-      });
+      };
+
+      // Flag fuzzy matches on large amounts — a false positive here is expensive
+      if (matchType === "fuzzy" && parseFloat(exp.amount) >= 10_000) {
+        entry.warning = `Fuzzy match on ${exp.amount} ${exp.currency} — verify manually. Reference matched loosely ("${exp.reference}" vs "${match.bank_statement_reference}").`;
+      }
+
+      matched.push(entry);
       usedDeposits.add(match.id);
     } else {
       unmatchedExpected.push(exp);

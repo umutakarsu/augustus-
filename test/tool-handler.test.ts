@@ -236,18 +236,18 @@ describe("Reconciliation", () => {
     expect(result.unexpected_deposits.items[0].ref).toBe("MYSTERY-PAY");
   });
 
-  it("fuzzy matches on mangled reference and fee-adjusted amount", async () => {
+  it("fuzzy matches on mangled reference and fee-adjusted amount (small transfer)", async () => {
     const banking = stubBanking({
       listDeposits: vi.fn().mockResolvedValue({
         data: [
-          { id: "dep-f1", status: "received", amount: "999.98", currency: "EUR", bank_statement_reference: "inv-001", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
+          { id: "dep-f1", status: "received", amount: "149.98", currency: "EUR", bank_statement_reference: "inv-001", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
         ],
         has_more: false, next_cursor: null,
       }),
     });
 
     const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
-      expected: [{ reference: "INV-001", amount: "1000.00", currency: "EUR" }],
+      expected: [{ reference: "INV-001", amount: "150.00", currency: "EUR" }],
     }));
 
     expect(result.summary.matched).toBe(1);
@@ -271,6 +271,45 @@ describe("Reconciliation", () => {
 
     expect(result.summary.matched).toBe(1);
     expect(result.summary.matched_fuzzy).toBe(1);
+  });
+
+  it("requires exact amount match on large transfers", async () => {
+    const banking = stubBanking({
+      listDeposits: vi.fn().mockResolvedValue({
+        data: [
+          { id: "dep-big", status: "received", amount: "99999.98", currency: "EUR", bank_statement_reference: "inv-500", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
+        ],
+        has_more: false, next_cursor: null,
+      }),
+    });
+
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
+      expected: [{ reference: "INV-500", amount: "100000.00", currency: "EUR" }],
+    }));
+
+    // 0.02 diff on a 100k transfer should NOT fuzzy match
+    expect(result.summary.matched).toBe(0);
+    expect(result.summary.missing_payments).toBe(1);
+  });
+
+  it("flags fuzzy matches on large amounts for manual review", async () => {
+    const banking = stubBanking({
+      listDeposits: vi.fn().mockResolvedValue({
+        data: [
+          { id: "dep-lg", status: "received", amount: "50000.00", currency: "EUR", bank_statement_reference: "invoice 789 payment", rail: "sepa", returns: [], created_at: "2026-05-17T00:00:00Z", source: {}, destination_account_id: "acc-eur" },
+        ],
+        has_more: false, next_cursor: null,
+      }),
+    });
+
+    const result = JSON.parse(await handleToolCall({ banking, payments: null }, "reconcile_deposits", {
+      expected: [{ reference: "INVOICE-789", amount: "50000.00", currency: "EUR" }],
+    }));
+
+    // Exact amount, fuzzy reference on a large amount — matches but with warning
+    expect(result.summary.matched).toBe(1);
+    expect(result.matched[0].match_type).toBe("fuzzy");
+    expect(result.matched[0].warning).toContain("verify manually");
   });
 
   it("reports all clean when everything matches", async () => {

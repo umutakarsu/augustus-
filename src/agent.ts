@@ -46,6 +46,18 @@ Rules:
 
 const MAX_HISTORY = 40;
 
+export type Emit = (type: "text" | "tool_start" | "tool_done" | "tool_error" | "done", data: string) => void;
+
+const cliEmit: Emit = (type, data) => {
+  switch (type) {
+    case "text": process.stdout.write(data); break;
+    case "tool_start": process.stdout.write(`  ⚡ ${data}...`); break;
+    case "tool_done": process.stdout.write(" done\n"); break;
+    case "tool_error": process.stdout.write(" error\n"); break;
+    case "done": process.stdout.write("\n"); break;
+  }
+};
+
 export class TreasuryAgent {
   private anthropic: Anthropic;
   private clients: { banking: BankingClient; payments: PaymentsClient | null };
@@ -59,14 +71,14 @@ export class TreasuryAgent {
     };
   }
 
-  async chat(message: string): Promise<string> {
+  async chat(message: string, emit: Emit = cliEmit): Promise<string> {
     this.history.push({ role: "user", content: message });
     if (this.history.length > MAX_HISTORY) {
       this.history = this.history.slice(this.history.length - MAX_HISTORY);
       if (this.history[0]?.role === "assistant") this.history.shift();
     }
 
-    let res = await this.streamResponse();
+    let res = await this.streamResponse(emit);
 
     while (res.stop_reason === "tool_use") {
       this.history.push({ role: "assistant", content: res.content });
@@ -75,24 +87,25 @@ export class TreasuryAgent {
       for (const block of res.content) {
         if (block.type !== "tool_use") continue;
 
-        process.stdout.write(`  ⚡ ${block.name.replace(/_/g, " ")}...`);
+        const label = block.name.replace(/_/g, " ");
+        emit("tool_start", label);
         let output: string;
         try {
           output = await handleToolCall(this.clients, block.name, block.input as Record<string, unknown>);
-          process.stdout.write(" done\n");
+          emit("tool_done", label);
         } catch (err) {
           output = JSON.stringify({ error: err instanceof Error ? err.message : "Unknown error" });
-          process.stdout.write(" error\n");
+          emit("tool_error", label);
         }
         results.push({ type: "tool_result", tool_use_id: block.id, content: output });
       }
 
       this.history.push({ role: "user", content: results });
-      res = await this.streamResponse();
+      res = await this.streamResponse(emit);
     }
 
     this.history.push({ role: "assistant", content: res.content });
-    process.stdout.write("\n");
+    emit("done", "");
 
     return res.content
       .filter((b) => b.type === "text")
@@ -100,7 +113,7 @@ export class TreasuryAgent {
       .join("\n");
   }
 
-  private async streamResponse(): Promise<Anthropic.Message> {
+  private async streamResponse(emit: Emit): Promise<Anthropic.Message> {
     const stream = this.anthropic.messages.stream({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
@@ -109,7 +122,7 @@ export class TreasuryAgent {
       messages: this.history,
     });
 
-    stream.on("text", (text) => process.stdout.write(text));
+    stream.on("text", (text) => emit("text", text));
 
     return stream.finalMessage();
   }
